@@ -35,6 +35,8 @@
 
 #include "env_internal.h"
 
+#include <rte_eal.h>
+#include <rte_pci.h>
 #include <rte_config.h>
 #include <rte_eal_memconfig.h>
 
@@ -54,7 +56,9 @@
 #include <linux/vfio.h>
 
 /* Internal DPDK function forward declaration */
-int pci_vfio_is_enabled(void);
+//int pci_vfio_is_enabled(void);
+
+extern struct rte_pci_bus rte_pci_bus;
 
 struct spdk_vfio_dma_map {
 	struct vfio_iommu_type1_dma_map map;
