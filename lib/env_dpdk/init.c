@@ -31,6 +31,8 @@
  *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include <stdlib.h>
+
 #include "spdk/stdinc.h"
 
 #include "env_internal.h"
@@ -339,6 +341,8 @@ int spdk_env_init(const struct spdk_env_opts *opts)
 	char **dpdk_args = NULL;
 	int i, rc;
 	int orig_optind;
+	char *env;
+	int noinit = 0;
 
 	rc = spdk_build_eal_cmdline(opts);
 	if (rc < 0) {
@@ -367,9 +371,26 @@ int spdk_env_init(const struct spdk_env_opts *opts)
 	fflush(stdout);
 	orig_optind = optind;
 	optind = 1;
-	rc = rte_eal_init(eal_cmdline_argcount, dpdk_args);
-	optind = orig_optind;
 
+        env = getenv("SPDK_NOINIT");
+        if (env)
+        {
+		noinit = atoi(env);
+		if (noinit)
+		{
+			rc = 0;
+			printf("Skip DPDK Init! Must be done from another lib (like ODP)!\n");
+		}
+			
+	}
+
+	if (!noinit)
+	{
+		printf("Init DPDK\n");
+		rc = rte_eal_init(eal_cmdline_argcount, dpdk_args);
+	}
+
+	optind = orig_optind;
 	free(dpdk_args);
 
 	if (rc < 0) {
