@@ -1,8 +1,9 @@
 #include <stdio.h>
 #include <stdbool.h>
 
-#include "spdk/stdinc.h"
+#include "bdev_nvme.h"
 
+#include "spdk/stdinc.h"
 #include "spdk/bdev.h"
 #include "spdk/copy_engine.h"
 #include "spdk/conf.h"
@@ -11,6 +12,8 @@
 #include "spdk/log.h"
 #include "spdk/string.h"
 #include "spdk/queue.h"
+
+#define DEVICE_NAME "s4msung"
 
 /* Used to pass messages between fio threads */
 struct pls_msg {
@@ -35,7 +38,16 @@ struct pls_poller
 	TAILQ_ENTRY(pls_poller)	link;
 };
 
+typedef struct pls_target_s
+{
+	struct spdk_bdev	*bd;
+	struct spdk_bdev_desc	*desc;
+	struct spdk_io_channel	*ch;
+} pls_target_t;
+
+char *pci_nvme_addr = "0000:02:00.0";
 pls_thread_t pls_thread;
+pls_target_t pls_target;
 
 int init(void);
 
@@ -130,7 +142,13 @@ int init(void)
 	struct spdk_conf *config;
 	struct spdk_env_opts opts;
 	bool done = false;
-	size_t count;
+	size_t cnt;
+
+	//this identifies an unique endpoint on an NVMe fabric
+	struct spdk_nvme_transport_id trid = {};
+	const char *names[NVME_MAX_BDEVS_PER_RPC];
+	size_t count = NVME_MAX_BDEVS_PER_RPC;
+	int i;
 
 	memset(&pls_thread, 0x0, sizeof(pls_thread_t));
 
@@ -209,25 +227,78 @@ int init(void)
 	 * This handles any final events posted by pollers.
 	 */
 	do {
-		count = pls_poll_thread(&pls_thread);
-	} while (count > 0);
+		cnt = pls_poll_thread(&pls_thread);
+	} while (cnt > 0);
+
+
+	//create device
+	/*
+	spdk_bdev_nvme_create(struct spdk_nvme_transport_id *trid,
+		      const char *base_name,
+		      const char **names, size_t *count)
+	*/
+	//fill up trid.
+	trid.trtype = SPDK_NVME_TRANSPORT_PCIE;
+	trid.adrfam = 0;
+	memcpy(trid.traddr, pci_nvme_addr, strlen(pci_nvme_addr));
+	
+	//in names returns names of created devices, in count returns number of devices
+	rv = spdk_bdev_nvme_create(&trid, DEVICE_NAME, names, &count);
+
+	if (rv)
+	{
+		printf("error: can't create bdev device!\n");
+		return -1;
+	}
+	for (i = 0; i < count; i++) 
+	{
+		printf("#%d: device %s created \n", i, names[i]);
+	}
+
+
 
 	return rv;
 }
 
+int open_dev()
+{
+	int rv = 0;
+	pls_target->bd = spdk_bdev_get_by_name(DEVICE_NAME);
+	if (!bd)
+	{
+		printf("failed to get device\n");
+		rv = 1; return rv;
+	}
+	else
+		printf("got device with name %s\n", DEVICE_NAME);
 
+	rv = spdk_bdev_open(pls_target->bd, 1, NULL, NULL, &pls_target->desc);
+	if (rv)
+	{
+		printf("failed to open device\n");
+		return rv;
+	}
+
+	return rv;
+}
 
 int main(int argc, char *argv[])
 {
 	int rv = 0;
 
 	rv = init();
+	if (rv)
+	{
+		printf("init failed. exiting\n");
+		exit(1);
+	}
 
-
-
-
-
-
+	rv = open_dev();
+	if (rv)
+	{
+		printf("open_dev failed. exiting\n");
+		exit(1);
+	}
 
 
 
