@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <stdbool.h>
 
-#include "bdev_nvme.h"
+#include "../lib/bdev/nvme/bdev_nvme.h"
 
 #include "spdk/stdinc.h"
 #include "spdk/bdev.h"
@@ -13,6 +13,7 @@
 #include "spdk/string.h"
 #include "spdk/queue.h"
 
+#define NVME_MAX_BDEVS_PER_RPC 32
 #define DEVICE_NAME "s4msung"
 #define NUM_THREADS 4
 
@@ -50,12 +51,12 @@ struct pls_poller
 
 char *pci_nvme_addr = "0000:02:00.0";
 pls_thread_t pls_ctrl_thread;
-pls_thread_t pls_thread[NUM_THREADS] = {0};
+pls_thread_t pls_thread[NUM_THREADS];
 
 int init(void);
+int init_thread(pls_thread_t*);
 
-static void
-spdk_fio_bdev_init_done(void *cb_arg, int rc)
+static void pls_bdev_init_done(void *cb_arg, int rc)
 {
 	printf("bdev init is done\n");
 	*(bool *)cb_arg = true;
@@ -66,6 +67,8 @@ static size_t pls_poll_thread(pls_thread_t *thread)
 	struct pls_msg *msg;
 	//struct spdk_fio_poller *p, *tmp;
 	size_t count;
+
+	printf("%s() called \n", __func__);
 
 	/* Process new events */
 	count = spdk_ring_dequeue(thread->ring, (void **)&msg, 1);
@@ -81,6 +84,8 @@ static size_t pls_poll_thread(pls_thread_t *thread)
 	}
 	*/
 
+	printf("%s() exited \n", __func__);
+
 	return count;
 }
 
@@ -91,6 +96,8 @@ static void pls_send_msg(spdk_thread_fn fn, void *ctx, void *thread_ctx)
         pls_thread_t *thread = thread_ctx;
         struct pls_msg *msg;
         size_t count;
+
+	printf("%s() called \n", __func__);
 
         msg = calloc(1, sizeof(*msg));
         assert(msg != NULL);
@@ -111,7 +118,7 @@ static struct spdk_poller* pls_start_poller(void *thread_ctx, spdk_poller_fn fn,
         struct pls_poller *poller;
 
         poller = calloc(1, sizeof(*poller));
-        if (poller) 
+        if (!poller) 
 	{
                 SPDK_ERRLOG("Unable to allocate poller\n");
                 return NULL;
@@ -157,6 +164,8 @@ int init(void)
 	/* Parse the SPDK configuration file */
 
 	//just allocate mem via calloc
+	//
+#if 0
 	config = spdk_conf_allocate();
 	if (!config) {
 		SPDK_ERRLOG("Unable to allocate configuration file\n");
@@ -176,6 +185,7 @@ int init(void)
 		return -1;
 	}
 	spdk_conf_set_as_default(config);
+#endif
 
 	/* Initialize the environment library */
 	spdk_env_opts_init(&opts);
@@ -183,7 +193,7 @@ int init(void)
 
 	if (spdk_env_init(&opts) < 0) {
 		SPDK_ERRLOG("Unable to initialize SPDK env\n");
-		spdk_conf_free(config);
+		//spdk_conf_free(config);
 		return -1;
 	}
 	spdk_unaffinitize_thread();
@@ -210,11 +220,13 @@ int init(void)
                 return -1;
         }
 
+	TAILQ_INIT(&pls_ctrl_thread.pollers);
+
 	/* Initialize the copy engine */
 	spdk_copy_engine_initialize();
 
 	/* Initialize the bdev layer */
-	spdk_bdev_initialize(spdk_fio_bdev_init_done, &done);
+	spdk_bdev_initialize(pls_bdev_init_done, &done);
 
 	/* First, poll until initialization is done. */
 	do {
@@ -241,26 +253,26 @@ int init(void)
 	trid.adrfam = 0;
 	memcpy(trid.traddr, pci_nvme_addr, strlen(pci_nvme_addr));
 	
+	printf("creating bdev device...\n");
 	//in names returns names of created devices, in count returns number of devices
 	rv = spdk_bdev_nvme_create(&trid, DEVICE_NAME, names, &count);
-
 	if (rv)
 	{
 		printf("error: can't create bdev device!\n");
 		return -1;
 	}
-	for (i = 0; i < count; i++) 
+	for (i = 0; i < (int)count; i++) 
 	{
 		printf("#%d: device %s created \n", i, names[i]);
 	}
-
-
 
 	return rv;
 }
 
 int init_thread(pls_thread_t *t)
 {
+	int rv = 0;
+
 	t->ring = spdk_ring_create(SPDK_RING_TYPE_MP_SC, 4096, SPDK_ENV_SOCKET_ID_ANY);
 	if (!t->ring) 
 	{
@@ -282,9 +294,8 @@ int init_thread(pls_thread_t *t)
                 return -1;
         }
 
-	int rv = 0;
 	t->pls_target.bd = spdk_bdev_get_by_name(DEVICE_NAME);
-	if (!bd)
+	if (!t->pls_target.bd)
 	{
 		printf("failed to get device\n");
 		rv = 1; return rv;
@@ -323,7 +334,7 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
-	for (i = 0; i < THREADS_NUM; i++)
+	for (i = 0; i < NUM_THREADS; i++)
 	{
 		rv = init_thread(&pls_thread[i]);
 		if (rv)
