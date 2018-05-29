@@ -18,6 +18,7 @@
 #include "spdk/string.h"
 #include "spdk/queue.h"
 
+#define MB 1048576
 #define NVME_MAX_BDEVS_PER_RPC 32
 #define DEVICE_NAME "s4msung"
 #define NUM_THREADS 4
@@ -38,6 +39,7 @@ typedef struct pls_target_s
 
 typedef struct pls_thread_s
 {
+	int idx;
 	pthread_t pthread_desc;
         struct spdk_thread *thread; /* spdk thread context */
         struct spdk_ring *ring; /* ring for passing messages to this thread */
@@ -69,10 +71,22 @@ static void pls_bdev_init_done(void *cb_arg, int rc)
 	*(bool *)cb_arg = true;
 }
 
+//this callback called when write is completed
+static void pls_bdev_write_done_cb(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg)
+{
+	printf("bdev write is done\n");
+	if (success)
+		printf("write completed successfully\n");
+	else
+		printf("write failed\n");
+
+	spdk_dma_free(cb_arg);
+}
+
 static size_t pls_poll_thread(pls_thread_t *thread)
 {
 	struct pls_msg *msg;
-	//struct spdk_fio_poller *p, *tmp;
+	struct pls_poller *p, *tmp;
 	size_t count;
 
 	printf("%s() called \n", __func__);
@@ -80,16 +94,14 @@ static size_t pls_poll_thread(pls_thread_t *thread)
 	/* Process new events */
 	count = spdk_ring_dequeue(thread->ring, (void **)&msg, 1);
 	if (count > 0) {
-		//msg->cb_fn(msg->cb_arg);
+		msg->cb_fn(msg->cb_arg);
 		free(msg);
 	}
 
 	/* Call all pollers */
-	/*
 	TAILQ_FOREACH_SAFE(p, &thread->pollers, link, tmp) {
 		p->cb_fn(p->cb_arg);
 	}
-	*/
 
 	printf("%s() exited \n", __func__);
 
@@ -279,9 +291,15 @@ int init(void)
 void* init_thread(void *arg)
 {
 	int rv = 0;
+	void *buf;
+	uint64_t nbytes = MB;
 	pls_thread_t *t = (pls_thread_t*)arg;
+	uint64_t offset;
+	int i;
 
-	printf("%s() called \n", __func__);
+	//init offset
+	offset = t->idx * 0x10000000;
+	printf("%s() called from thread #%d. offset: 0x%lx\n", __func__, t->idx, offset);
 
 	t->ring = spdk_ring_create(SPDK_RING_TYPE_MP_SC, 4096, SPDK_ENV_SOCKET_ID_ANY);
 	if (!t->ring) 
@@ -332,10 +350,28 @@ void* init_thread(void *arg)
 		rv = -1; return NULL;
 	}
 
-	printf("thread init done. going to sleep\n");
+	printf("thread init done.\n");
 
+	i = 0;
 	while(1)
 	{
+		buf = spdk_dma_zmalloc(nbytes, 0, NULL); //last param - ptr to phys addr
+		if (buf)
+		{
+			printf("writing data from thread# #%d, iteration: %d, offset: 0x%lx\n", t->idx, i, offset);
+			rv = spdk_bdev_write(t->pls_target.desc, t->pls_target.ch, 
+				buf, offset, nbytes, pls_bdev_write_done_cb, buf);
+			if (rv)
+				printf("spdk_bdev_write failed\n");
+
+			offset += nbytes;
+		}
+		else
+			printf("failed to allocate dma buffer \n");
+		i++;
+		if (i == 100)
+			break;
+
 		usleep(10);
 	}
 
@@ -356,6 +392,7 @@ int main(int argc, char *argv[])
 
 	for (i = 0; i < NUM_THREADS; i++)
 	{
+		pls_thread[i].idx = i;
 		rv = pthread_create(&pls_thread[i].pthread_desc, NULL, init_thread, &pls_thread[i]);
 		if (rv)
 		{
