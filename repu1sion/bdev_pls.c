@@ -1,5 +1,10 @@
+//we have to call spdk_allocate_thread() for every thread and we should
+//continue to do IO from this thread
+
+
 #include <stdio.h>
 #include <stdbool.h>
+#include <pthread.h>
 
 #include "../lib/bdev/nvme/bdev_nvme.h"
 
@@ -33,6 +38,7 @@ typedef struct pls_target_s
 
 typedef struct pls_thread_s
 {
+	pthread_t pthread_desc;
         struct spdk_thread *thread; /* spdk thread context */
         struct spdk_ring *ring; /* ring for passing messages to this thread */
 	pls_target_t pls_target;
@@ -50,11 +56,12 @@ struct pls_poller
 };
 
 char *pci_nvme_addr = "0000:02:00.0";
+const char *names[NVME_MAX_BDEVS_PER_RPC];
 pls_thread_t pls_ctrl_thread;
 pls_thread_t pls_thread[NUM_THREADS];
 
 int init(void);
-int init_thread(pls_thread_t*);
+void* init_thread(void*);
 
 static void pls_bdev_init_done(void *cb_arg, int rc)
 {
@@ -149,17 +156,17 @@ spdk_fio_stop_poller(struct spdk_poller *poller, void *thread_ctx)
 int init(void)
 {
 	int rv = 0;
-	struct spdk_conf *config;
+	//struct spdk_conf *config;
 	struct spdk_env_opts opts;
 	bool done = false;
 	size_t cnt;
 
 	//this identifies an unique endpoint on an NVMe fabric
 	struct spdk_nvme_transport_id trid = {};
-	const char *names[NVME_MAX_BDEVS_PER_RPC];
 	size_t count = NVME_MAX_BDEVS_PER_RPC;
 	int i;
 
+	printf("%s() called \n", __func__);
 
 	/* Parse the SPDK configuration file */
 
@@ -269,15 +276,18 @@ int init(void)
 	return rv;
 }
 
-int init_thread(pls_thread_t *t)
+void* init_thread(void *arg)
 {
 	int rv = 0;
+	pls_thread_t *t = (pls_thread_t*)arg;
+
+	printf("%s() called \n", __func__);
 
 	t->ring = spdk_ring_create(SPDK_RING_TYPE_MP_SC, 4096, SPDK_ENV_SOCKET_ID_ANY);
 	if (!t->ring) 
 	{
 		printf("failed to allocate ring\n");
-		rv = -1; return rv;
+		rv = -1; return NULL;
 	}
 
 	// Initializes the calling(current) thread for I/O channel allocation
@@ -285,41 +295,51 @@ int init_thread(pls_thread_t *t)
 				     void *thread_ctx); */
 	
 	t->thread = spdk_allocate_thread(pls_send_msg, pls_start_poller,
-                                 spdk_fio_stop_poller, t/*XXX*/, "pls_ctrl_thread");
+                                 spdk_fio_stop_poller, (void*)t, "pls_worker_thread");
 
         if (!t->thread) 
 	{
                 spdk_ring_free(t->ring);
                 SPDK_ERRLOG("failed to allocate thread\n");
-                return -1;
+                return NULL;
         }
 
-	t->pls_target.bd = spdk_bdev_get_by_name(DEVICE_NAME);
+	TAILQ_INIT(&t->pollers);
+
+	t->pls_target.bd = spdk_bdev_get_by_name(names[0]); //XXX - we always try to open device with idx 0
 	if (!t->pls_target.bd)
 	{
 		printf("failed to get device\n");
-		rv = 1; return rv;
+		rv = 1; return NULL;
 	}
 	else
-		printf("got device with name %s\n", DEVICE_NAME);
+		printf("got device with name %s\n", names[0]);
 
 	//returns a descriptor
 	rv = spdk_bdev_open(t->pls_target.bd, 1, NULL, NULL, &t->pls_target.desc);
 	if (rv)
 	{
 		printf("failed to open device\n");
-		return rv;
+		return NULL;
 	}
 
+	printf("open io channel\n");
 	t->pls_target.ch = spdk_bdev_get_io_channel(t->pls_target.desc);
 	if (!t->pls_target.ch) 
 	{
 		printf("Unable to get I/O channel for bdev.\n");
 		spdk_bdev_close(t->pls_target.desc);
-		rv = -1; return rv;
+		rv = -1; return NULL;
 	}
 
-	return rv;
+	printf("thread init done. going to sleep\n");
+
+	while(1)
+	{
+		usleep(10);
+	}
+
+	return NULL;
 }
 
 int main(int argc, char *argv[])
@@ -336,7 +356,7 @@ int main(int argc, char *argv[])
 
 	for (i = 0; i < NUM_THREADS; i++)
 	{
-		rv = init_thread(&pls_thread[i]);
+		rv = pthread_create(&pls_thread[i].pthread_desc, NULL, init_thread, &pls_thread[i]);
 		if (rv)
 		{
 			printf("open_dev failed. exiting\n");
@@ -344,8 +364,10 @@ int main(int argc, char *argv[])
 		}
 	}
 
-
-
+	while(1)
+	{
+		usleep(10);
+	}
 
 	return rv;
 }
