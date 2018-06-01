@@ -19,6 +19,7 @@
 #include "spdk/queue.h"
 
 #define MB 1048576
+#define K4 4096
 #define NVME_MAX_BDEVS_PER_RPC 32
 #define DEVICE_NAME "s4msung"
 #define NUM_THREADS 4
@@ -35,6 +36,7 @@ typedef struct pls_target_s
 	struct spdk_bdev	*bd;
 	struct spdk_bdev_desc	*desc;
 	struct spdk_io_channel	*ch;
+	TAILQ_ENTRY(pls_target_s) link;
 } pls_target_t;
 
 typedef struct pls_thread_s
@@ -83,13 +85,25 @@ static void pls_bdev_write_done_cb(struct spdk_bdev_io *bdev_io, bool success, v
 	spdk_dma_free(cb_arg);
 }
 
+//this callback called when read is completed
+static void pls_bdev_read_done_cb(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg)
+{
+	printf("bdev read is done\n");
+	if (success)
+		printf("read completed successfully\n");
+	else
+		printf("read failed\n");
+
+	printf("%.*s \n", 16, (char*)cb_arg);
+}
+
 static size_t pls_poll_thread(pls_thread_t *thread)
 {
 	struct pls_msg *msg;
 	struct pls_poller *p, *tmp;
 	size_t count;
 
-	printf("%s() called \n", __func__);
+	//printf("%s() called \n", __func__);
 
 	/* Process new events */
 	count = spdk_ring_dequeue(thread->ring, (void **)&msg, 1);
@@ -103,7 +117,7 @@ static size_t pls_poll_thread(pls_thread_t *thread)
 		p->cb_fn(p->cb_arg);
 	}
 
-	printf("%s() exited \n", __func__);
+	//printf("%s() exited \n", __func__);
 
 	return count;
 }
@@ -136,6 +150,8 @@ static struct spdk_poller* pls_start_poller(void *thread_ctx, spdk_poller_fn fn,
         pls_thread_t *thread = thread_ctx;
         struct pls_poller *poller;
 
+	printf("%s() called \n", __func__);
+
         poller = calloc(1, sizeof(*poller));
         if (!poller) 
 	{
@@ -153,10 +169,12 @@ static struct spdk_poller* pls_start_poller(void *thread_ctx, spdk_poller_fn fn,
 }
 
 static void
-spdk_fio_stop_poller(struct spdk_poller *poller, void *thread_ctx)
+pls_stop_poller(struct spdk_poller *poller, void *thread_ctx)
 {
 	struct pls_poller *lpoller;
 	pls_thread_t *thread = thread_ctx;
+
+	printf("%s() called \n", __func__);
 
 	lpoller = (struct pls_poller *)poller;
 
@@ -230,7 +248,7 @@ int init(void)
 				     void *thread_ctx); */
 	
 	pls_ctrl_thread.thread = spdk_allocate_thread(pls_send_msg, pls_start_poller,
-                                 spdk_fio_stop_poller, &pls_ctrl_thread, "pls_ctrl_thread");
+                                 pls_stop_poller, &pls_ctrl_thread, "pls_ctrl_thread");
 
         if (!pls_ctrl_thread.thread) 
 	{
@@ -292,7 +310,7 @@ void* init_thread(void *arg)
 {
 	int rv = 0;
 	void *buf;
-	uint64_t nbytes = MB;
+	uint64_t nbytes = K4;
 	pls_thread_t *t = (pls_thread_t*)arg;
 	uint64_t offset;
 	int i;
@@ -313,7 +331,7 @@ void* init_thread(void *arg)
 				     void *thread_ctx); */
 	
 	t->thread = spdk_allocate_thread(pls_send_msg, pls_start_poller,
-                                 spdk_fio_stop_poller, (void*)t, "pls_worker_thread");
+                                 pls_stop_poller, (void*)t, "pls_worker_thread");
 
         if (!t->thread) 
 	{
@@ -355,10 +373,11 @@ void* init_thread(void *arg)
 	i = 0;
 	while(1)
 	{
-		buf = spdk_dma_zmalloc(nbytes, 0, NULL); //last param - ptr to phys addr
+		buf = spdk_dma_zmalloc(nbytes, 0, NULL); //last param - ptr to phys addr(OUT)
 		if (buf)
 		{
 			printf("writing data from thread# #%d, iteration: %d, offset: 0x%lx\n", t->idx, i, offset);
+			memset(buf, 0xFA, nbytes);
 			rv = spdk_bdev_write(t->pls_target.desc, t->pls_target.ch, 
 				buf, offset, nbytes, pls_bdev_write_done_cb, buf);
 			if (rv)
@@ -369,9 +388,37 @@ void* init_thread(void *arg)
 		else
 			printf("failed to allocate dma buffer \n");
 		i++;
-		if (i == 100)
+		if (i == 10)
 			break;
 
+		usleep(10);
+	}
+
+	//wait before reading data back
+	sleep(3);
+
+	//reading data back to check is it correctly wrote
+	printf("now trying to read data back\n");
+	offset = t->idx * 0x10000000;
+	void *bf = spdk_dma_malloc(nbytes, 0, NULL);
+	char *p;
+	if (!bf)
+		printf("failed to allocate RAM for reading\n");
+	else
+		memset(bf, 0xff, nbytes);
+	rv = spdk_bdev_read(t->pls_target.desc, t->pls_target.ch,
+		bf, offset, nbytes, pls_bdev_read_done_cb, bf);
+	printf("after spdk read\n");
+	if (rv)
+		printf("spdk_bdev_read failed\n");
+	else
+		printf("spdk_bdev_read NO errors\n");
+
+	sleep(5);
+	p = (char*)bf;
+	printf("dump: 0x%x%x%x%x \n", p[0], p[1], p[2], p[3]);
+	while(1)
+	{
 		usleep(10);
 	}
 
@@ -382,6 +429,12 @@ int main(int argc, char *argv[])
 {
 	int rv = 0;
 	int i;
+	size_t count;
+
+	//enable logging
+	spdk_log_set_print_level(SPDK_LOG_DEBUG);
+	spdk_log_set_level(SPDK_LOG_DEBUG);
+	spdk_log_open();
 
 	rv = init();
 	if (rv)
@@ -401,8 +454,16 @@ int main(int argc, char *argv[])
 		}
 	}
 
+	sleep(3);
 	while(1)
 	{
+		for (i = 0; i < NUM_THREADS; i++)
+		{
+			count = pls_poll_thread(&pls_thread[i]);
+			if (count)
+				printf("got %zu messages from thread %d\n", count, i);
+		}
+
 		usleep(10);
 	}
 
