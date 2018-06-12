@@ -11,7 +11,9 @@
 *.o
 *.pyc
 *.so
-*.swp
+*.sw?
+Session.vim
+repu1sion/bdev_odp/bdev_odp
 *.DS_Store
 ut_coverage/
 tags
