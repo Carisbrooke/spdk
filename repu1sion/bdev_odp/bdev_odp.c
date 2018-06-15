@@ -30,6 +30,7 @@
 #define NUM_THREADS 4
 #define NUM_INPUT_Q 4
 #define BUFFER_SIZE K4
+#define DEBUG
 
 #ifdef DEBUG
  #define debug(x...) printf(x)
@@ -101,14 +102,18 @@ static void pls_bdev_init_done(void *cb_arg, int rc)
 //this callback called when write is completed
 static void pls_bdev_write_done_cb(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg)
 {
+	pls_thread_t *t = (pls_thread_t*)cb_arg;
+
 	printf("bdev write is done\n");
 	if (success)
 		printf("write completed successfully\n");
 	else
 		printf("write failed\n");
 
-	spdk_dma_free(cb_arg);
-	cb_arg = NULL;
+	debug("before freeing ram in callback at addr: %p \n", t->buf); 
+	spdk_dma_free(t->buf);
+	debug("after freeing ram in callback at addr: %p \n", t->buf); 
+	t->buf = NULL;
 }
 
 //this callback called when read is completed
@@ -351,13 +356,9 @@ int init_odp(void)
 	if (pool == ODP_POOL_INVALID) exit(1);
 
 	odp_pktio_param_init(&pktio_param);
-#ifdef MODE_SCHED
-	pktio_param.in_mode = ODP_PKTIN_MODE_SCHED;
-	printf("setting sched mode\n");
-#elif defined MODE_QUEUE
+
 	pktio_param.in_mode = ODP_PKTIN_MODE_QUEUE;
 	printf("setting queue mode\n");
-#endif
 	pktio = odp_pktio_open(devname, pool, &pktio_param);
 	if (pktio == ODP_PKTIO_INVALID) exit(1);
 
@@ -365,13 +366,9 @@ int init_odp(void)
 	pktin_param.op_mode     = ODP_PKTIO_OP_MT;
 	pktin_param.hash_enable = 1;
 	pktin_param.num_queues  = NUM_INPUT_Q;
-#ifdef MODE_SCHED
-	pktin_param.queue_param.sched.sync = ODP_SCHED_SYNC_ATOMIC;
-	pktin_param.queue_param.sched.prio = ODP_SCHED_PRIO_DEFAULT;
-#endif
+
 	odp_pktin_queue_config(pktio, &pktin_param);
 	odp_pktout_queue_config(pktio, NULL);
-
 
 	return rv;
 }
@@ -382,7 +379,7 @@ void* init_thread(void *arg)
 	uint64_t nbytes = BUFFER_SIZE;
 	pls_thread_t *t = (pls_thread_t*)arg;
 	uint64_t offset;
-	unsigned int position = 0;
+	uint64_t position = 0;
 	int pkt_len;
 	//odp
 	odp_event_t ev;
@@ -458,48 +455,64 @@ void* init_thread(void *arg)
 				return NULL;
 			}
 			debug("allocated spdk dma buffer with addr: %p\n", t->buf);
-
-
 		}
 
 		//2. get packet from queue
 		ev = odp_queue_deq(inq[t->idx]);
+		//debug("got event\n");
 		pkt = odp_packet_from_event(ev);
+		//debug("got packet from event\n");
 		if (!odp_packet_is_valid(pkt))
 			continue;
 		pkt_len = (int)odp_packet_len(pkt);
+		debug("got packet with len: %d\n", pkt_len);
 		if (pkt_len > MAX_PACKET_SIZE)
 		{
 			printf("dropping big packet with size: %d \n", pkt_len);
 			continue;
 		}
 
+		//in position we count num of bytes copied into buffer. 
 		if (pkt_len)
 		{
-			if (position < nbytes-MAX_PACKET_SIZE)
+			if (position+pkt_len < nbytes)
 			{
-				//debug("got packet\n");
+				//debug("copying packet\n");
 				memcpy(t->buf+position, odp_packet_l2_ptr(pkt, NULL), pkt_len);
 				odp_schedule_release_atomic();
 				position += pkt_len;
 			}
-			if (position >= nbytes-MAX_PACKET_SIZE)
+			else
 			{
+				debug("writing %lu bytes from thread# #%d, offset: 0x%lx\n",
+					position, t->idx, offset);
 				rv = spdk_bdev_write(t->pls_target.desc, t->pls_target.ch, 
-					t->buf, offset, nbytes, pls_bdev_write_done_cb, t->buf);
+					t->buf, offset, /*position*/ nbytes, pls_bdev_write_done_cb, t);
 				if (rv)
 					printf("spdk_bdev_write failed\n");
-				debug("writing data from thread# #%d, offset: 0x%lx\n",
-					t->idx, offset);
 
 				offset += nbytes;
+				//offset += position;
 
 				//need to wait for bdev write completion first
-				while(!t->buf)
+				while(t->buf)
 				{
 					usleep(10);
 				}
 				position = 0;
+
+				//allocate new buffer and place packet to it
+				t->buf = spdk_dma_zmalloc(nbytes, 0x100000, NULL);
+				if (!t->buf) 
+				{
+					printf("ERROR: write buffer allocation failed\n");
+					return NULL;
+				}
+				debug("allocated spdk dma buffer with addr: %p\n", t->buf);
+
+				memcpy(t->buf+position, odp_packet_l2_ptr(pkt, NULL), pkt_len);
+				odp_schedule_release_atomic();
+				position += pkt_len;
 			}
 		}
 		odp_packet_free(pkt);
@@ -579,8 +592,8 @@ int main(int argc, char *argv[])
 			exit(1);
 		}
 	}
+	sleep(1);
 
-	sleep(3);
 	while(1)
 	{
 		for (i = 0; i < NUM_THREADS; i++)
