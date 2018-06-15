@@ -29,8 +29,8 @@
 #define DEVICE_NAME "s4msung"
 #define NUM_THREADS 4
 #define NUM_INPUT_Q 4
-#define BUFFER_SIZE K4
-#define DEBUG
+#define BUFFER_SIZE 524288
+//#define DEBUG
 
 #ifdef DEBUG
  #define debug(x...) printf(x)
@@ -102,13 +102,20 @@ static void pls_bdev_init_done(void *cb_arg, int rc)
 //this callback called when write is completed
 static void pls_bdev_write_done_cb(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg)
 {
+	static unsigned int cnt = 0;
 	pls_thread_t *t = (pls_thread_t*)cb_arg;
 
-	printf("bdev write is done\n");
+	//printf("bdev write is done\n");
 	if (success)
-		printf("write completed successfully\n");
+	{
+		debug("write completed successfully\n");
+		cnt++;
+	}
 	else
 		printf("write failed\n");
+
+	if (cnt % 1000 == 0)
+		printf("have %u successful write callabacks\n", cnt);
 
 	debug("before freeing ram in callback at addr: %p \n", t->buf); 
 	spdk_dma_free(t->buf);
