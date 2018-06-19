@@ -20,6 +20,7 @@
 #include "spdk/string.h"
 #include "spdk/queue.h"
 
+#define VERSION "0.7"
 #define MB 1048576
 #define K4 4096
 #define SHM_PKT_POOL_BUF_SIZE  1856
@@ -57,6 +58,7 @@ typedef struct pls_thread_s
 {
 	int idx;
         unsigned char *buf;
+	uint64_t offset;		//just for stats
 	pthread_t pthread_desc;
         struct spdk_thread *thread; /* spdk thread context */
         struct spdk_ring *ring; /* ring for passing messages to this thread */
@@ -102,25 +104,30 @@ static void pls_bdev_init_done(void *cb_arg, int rc)
 //this callback called when write is completed
 static void pls_bdev_write_done_cb(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg)
 {
-	static unsigned int cnt = 0;
+	static unsigned int cnt = 0;	//XXX - add mutex on cnt increasing!
 	pls_thread_t *t = (pls_thread_t*)cb_arg;
 
 	//printf("bdev write is done\n");
 	if (success)
 	{
 		debug("write completed successfully\n");
-		cnt++;
+		//cnt++;
+		__atomic_fetch_add(&cnt, 1, __ATOMIC_SEQ_CST);
 	}
 	else
 		printf("write failed\n");
 
 	if (cnt % 1000 == 0)
-		printf("have %u successful write callabacks\n", cnt);
+		printf("have %u successful write callabacks. thread #%d, offset: 0x%lx \n",
+			 cnt, t->idx, t->offset);
 
 	debug("before freeing ram in callback at addr: %p \n", t->buf); 
 	spdk_dma_free(t->buf);
 	debug("after freeing ram in callback at addr: %p \n", t->buf); 
 	t->buf = NULL;
+
+	//important to free bdev_io request, or it will lead to pool overflow (65K)
+	spdk_bdev_free_io(bdev_io);
 }
 
 //this callback called when read is completed
@@ -393,7 +400,7 @@ void* init_thread(void *arg)
 	odp_packet_t pkt;
 
 	//init offset
-	offset = t->idx * 0x10000000;
+	offset = t->idx * 0x100000000; //each thread has a 4 Gb of space
 	printf("%s() called from thread #%d. offset: 0x%lx\n", __func__, t->idx, offset);
 
 	t->ring = spdk_ring_create(SPDK_RING_TYPE_MP_SC, 4096, SPDK_ENV_SOCKET_ID_ANY);
@@ -493,6 +500,7 @@ void* init_thread(void *arg)
 			{
 				debug("writing %lu bytes from thread# #%d, offset: 0x%lx\n",
 					position, t->idx, offset);
+				t->offset = offset; //for stats
 				rv = spdk_bdev_write(t->pls_target.desc, t->pls_target.ch, 
 					t->buf, offset, /*position*/ nbytes, pls_bdev_write_done_cb, t);
 				if (rv)
@@ -563,6 +571,8 @@ int main(int argc, char *argv[])
 	int rv = 0;
 	int i;
 	size_t count;
+
+	printf("version: %s\n", VERSION);
 
 	//enable logging
 	spdk_log_set_print_level(SPDK_LOG_DEBUG);
