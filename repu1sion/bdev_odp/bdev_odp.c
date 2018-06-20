@@ -20,7 +20,7 @@
 #include "spdk/string.h"
 #include "spdk/queue.h"
 
-#define VERSION "0.7"
+#define VERSION "0.71"
 #define MB 1048576
 #define K4 4096
 #define SHM_PKT_POOL_BUF_SIZE  1856
@@ -31,6 +31,7 @@
 #define NUM_THREADS 4
 #define NUM_INPUT_Q 4
 #define BUFFER_SIZE 524288
+#define THREAD_LIMIT 0x100000000	//space for every thread to write
 //#define DEBUG
 
 #ifdef DEBUG
@@ -393,6 +394,7 @@ void* init_thread(void *arg)
 	uint64_t nbytes = BUFFER_SIZE;
 	pls_thread_t *t = (pls_thread_t*)arg;
 	uint64_t offset;
+	uint64_t thread_limit;
 	uint64_t position = 0;
 	int pkt_len;
 	//odp
@@ -401,6 +403,7 @@ void* init_thread(void *arg)
 
 	//init offset
 	offset = t->idx * 0x100000000; //each thread has a 4 Gb of space
+	thread_limit = offset + THREAD_LIMIT;
 	printf("%s() called from thread #%d. offset: 0x%lx\n", __func__, t->idx, offset);
 
 	t->ring = spdk_ring_create(SPDK_RING_TYPE_MP_SC, 4096, SPDK_ENV_SOCKET_ID_ANY);
@@ -498,13 +501,27 @@ void* init_thread(void *arg)
 			}
 			else
 			{
+				//quit if we reached thread_limit
+				if (offset + nbytes >= thread_limit)
+				{
+					printf("#%d. thread limit reached: 0x%lx\n", t->idx, thread_limit);
+					odp_packet_free(pkt);
+					if (t->buf)
+					{
+						spdk_dma_free(t->buf);
+						t->buf = NULL;
+					}
+					return NULL;
+				}
+
 				debug("writing %lu bytes from thread# #%d, offset: 0x%lx\n",
-					position, t->idx, offset);
+					nbytes, t->idx, offset);
 				t->offset = offset; //for stats
 				rv = spdk_bdev_write(t->pls_target.desc, t->pls_target.ch, 
 					t->buf, offset, /*position*/ nbytes, pls_bdev_write_done_cb, t);
 				if (rv)
-					printf("spdk_bdev_write failed\n");
+					printf("#%d spdk_bdev_write failed, offset: 0x%lx, size: %lu\n",
+						t->idx, offset, nbytes);
 
 				offset += nbytes;
 				//offset += position;
