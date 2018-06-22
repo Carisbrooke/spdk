@@ -1,7 +1,6 @@
 //we have to call spdk_allocate_thread() for every thread and we should
 //continue to do IO from this thread
 
-
 #include <stdio.h>
 #include <stdbool.h>
 #include <pthread.h>
@@ -20,7 +19,7 @@
 #include "spdk/string.h"
 #include "spdk/queue.h"
 
-#define VERSION "0.71"
+#define VERSION "0.80"
 #define MB 1048576
 #define K4 4096
 #define SHM_PKT_POOL_BUF_SIZE  1856
@@ -32,7 +31,7 @@
 #define NUM_INPUT_Q 4
 #define BUFFER_SIZE 524288
 #define THREAD_LIMIT 0x100000000	//space for every thread to write
-//#define DEBUG
+#define DEBUG
 
 #ifdef DEBUG
  #define debug(x...) printf(x)
@@ -58,6 +57,7 @@ typedef struct pls_target_s
 typedef struct pls_thread_s
 {
 	int idx;
+	bool read_complete;		//flag, false when read callback not finished, else - tru
         unsigned char *buf;
 	uint64_t offset;		//just for stats
 	pthread_t pthread_desc;
@@ -91,10 +91,39 @@ odp_pktio_t pktio;
 odp_pktin_queue_param_t pktin_param;
 odp_queue_t inq[NUM_INPUT_Q] = {0};	//keep handles to queues here
 
+void hexdump(void *, unsigned int );
 int init(void);
 void* init_thread(void*);
 int init_spdk(void);
 int init_odp(void);
+
+void hexdump(void *addr, unsigned int size)
+{
+        unsigned int i;
+        /* move with 1 byte step */
+        unsigned char *p = (unsigned char*)addr;
+
+        //printf("addr : %p \n", addr);
+
+        if (!size)
+        {
+                printf("bad size %u\n",size);
+                return;
+        }
+
+        for (i = 0; i < size; i++)
+        {
+                if (!(i % 16))    /* 16 bytes on line */
+                {
+                        if (i)
+                                printf("\n");
+                        printf("0x%lX | ", (long unsigned int)(p+i)); /* print addr at the line begin */
+                }
+                printf("%02X ", p[i]); /* space here */
+        }
+
+        printf("\n");
+}
 
 static void pls_bdev_init_done(void *cb_arg, int rc)
 {
@@ -105,7 +134,7 @@ static void pls_bdev_init_done(void *cb_arg, int rc)
 //this callback called when write is completed
 static void pls_bdev_write_done_cb(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg)
 {
-	static unsigned int cnt = 0;	//XXX - add mutex on cnt increasing!
+	static unsigned int cnt = 0;
 	pls_thread_t *t = (pls_thread_t*)cb_arg;
 
 	//printf("bdev write is done\n");
@@ -134,13 +163,24 @@ static void pls_bdev_write_done_cb(struct spdk_bdev_io *bdev_io, bool success, v
 //this callback called when read is completed
 static void pls_bdev_read_done_cb(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg)
 {
-	printf("bdev read is done\n");
+	static unsigned int cnt = 0;
+	pls_thread_t *t = (pls_thread_t*)cb_arg;
+
+	debug("bdev read is done\n");
 	if (success)
-		printf("read completed successfully\n");
+	{
+		t->read_complete = true;
+		__atomic_fetch_add(&cnt, 1, __ATOMIC_SEQ_CST);
+		debug("read completed successfully\n");
+	}
 	else
 		printf("read failed\n");
 
-	printf("%.*s \n", 16, (char*)cb_arg);
+	if (cnt % 1000 == 0)
+		printf("have %u successful read callabacks. thread #%d, offset: 0x%lx \n",
+			 cnt, t->idx, t->offset);
+
+	spdk_bdev_free_io(bdev_io);
 }
 
 static size_t pls_poll_thread(pls_thread_t *thread)
@@ -214,8 +254,7 @@ static struct spdk_poller* pls_start_poller(void *thread_ctx, spdk_poller_fn fn,
         return (struct spdk_poller *)poller;
 }
 
-static void
-pls_stop_poller(struct spdk_poller *poller, void *thread_ctx)
+static void pls_stop_poller(struct spdk_poller *poller, void *thread_ctx)
 {
 	struct pls_poller *lpoller;
 	pls_thread_t *thread = thread_ctx;
@@ -397,6 +436,7 @@ void* init_thread(void *arg)
 	uint64_t thread_limit;
 	uint64_t position = 0;
 	int pkt_len;
+	void *bf;
 	//odp
 	odp_event_t ev;
 	odp_packet_t pkt;
@@ -482,7 +522,7 @@ void* init_thread(void *arg)
 		if (!odp_packet_is_valid(pkt))
 			continue;
 		pkt_len = (int)odp_packet_len(pkt);
-		debug("got packet with len: %d\n", pkt_len);
+		//debug("got packet with len: %d\n", pkt_len);
 		if (pkt_len > MAX_PACKET_SIZE)
 		{
 			printf("dropping big packet with size: %d \n", pkt_len);
@@ -511,7 +551,11 @@ void* init_thread(void *arg)
 						spdk_dma_free(t->buf);
 						t->buf = NULL;
 					}
-					return NULL;
+					//in case of thread id 0 we do reading, other threads just quit
+					if (t->idx == 0)
+						goto read;
+					else
+						return NULL;
 				}
 
 				debug("writing %lu bytes from thread# #%d, offset: 0x%lx\n",
@@ -550,36 +594,48 @@ void* init_thread(void *arg)
 		odp_packet_free(pkt);
 	}
 
-#if 0
+#if 1
+read:
+
 	//wait before reading data back
-	sleep(3);
+	sleep(1);
 
 	//reading data back to check is it correctly wrote
 	printf("now trying to read data back\n");
 	offset = t->idx * 0x10000000;
-	void *bf = spdk_dma_malloc(nbytes, 0, NULL);
-	char *p;
-	if (!bf)
-		printf("failed to allocate RAM for reading\n");
-	else
-		memset(bf, 0xff, nbytes);
-	rv = spdk_bdev_read(t->pls_target.desc, t->pls_target.ch,
-		bf, offset, nbytes, pls_bdev_read_done_cb, bf);
-	printf("after spdk read\n");
-	if (rv)
-		printf("spdk_bdev_read failed\n");
-	else
-		printf("spdk_bdev_read NO errors\n");
 
-	sleep(5);
-	p = (char*)bf;
-	printf("dump: 0x%x%x%x%x \n", p[0], p[1], p[2], p[3]);
 	while(1)
 	{
-		usleep(10);
-	}
-#endif
+		bf = spdk_dma_zmalloc(nbytes, 0, NULL);
+		if (!bf)
+		{
+			printf("failed to allocate RAM for reading\n");
+			return NULL;
+		}
+		t->read_complete = false;
+		rv = spdk_bdev_read(t->pls_target.desc, t->pls_target.ch,
+			bf, offset, nbytes, pls_bdev_read_done_cb, t);
+		printf("after spdk read\n");
+		if (rv)
+			printf("spdk_bdev_read failed\n");
+		else
+		{
+			offset += nbytes;
+			printf("spdk_bdev_read NO errors\n");
+		}
+		//need to wait for bdev read completion first
+		while(t->read_complete == false)
+		{
+			usleep(10);
+		}
 
+		//print dump
+		hexdump(bf, 128);
+
+		spdk_dma_free(bf);
+	}
+
+#endif
 	return NULL;
 }
 
@@ -628,6 +684,7 @@ int main(int argc, char *argv[])
 	}
 	sleep(1);
 
+	//need this poll loop to get callbacks after I/O completions
 	while(1)
 	{
 		for (i = 0; i < NUM_THREADS; i++)
@@ -639,6 +696,23 @@ int main(int argc, char *argv[])
 
 		usleep(10);
 	}
+
+#if 0
+	for (i = 0; i < NUM_THREADS; i++)
+	{
+		pthread_join(pls_thread[i].pthread_desc, NULL);
+	}
+
+	printf("all writing threads are finished now\n");
+#endif		
+
+	while(1)
+	{
+		usleep(10);
+	}
+
+
+
 
 	return rv;
 }
