@@ -19,7 +19,7 @@
 #include "spdk/string.h"
 #include "spdk/queue.h"
 
-#define VERSION "0.80"
+#define VERSION "0.81"
 #define MB 1048576
 #define K4 4096
 #define SHM_PKT_POOL_BUF_SIZE  1856
@@ -92,6 +92,8 @@ odp_pktin_queue_param_t pktin_param;
 odp_queue_t inq[NUM_INPUT_Q] = {0};	//keep handles to queues here
 
 void hexdump(void *, unsigned int );
+struct pcap_file_header* pls_pcap_gl_header(void);
+int pls_pcap_file_create(char *);
 int init(void);
 void* init_thread(void*);
 int init_spdk(void);
@@ -130,6 +132,82 @@ static void pls_bdev_init_done(void *cb_arg, int rc)
 	printf("bdev init is done\n");
 	*(bool *)cb_arg = true;
 }
+
+//------------------------------------------------------------------------------
+//PCAP functions
+//------------------------------------------------------------------------------
+typedef int bpf_int32;
+typedef u_int bpf_u_int32;
+
+struct pcap_file_header 
+{
+	bpf_u_int32 magic;
+	u_short version_major;
+	u_short version_minor;
+	bpf_int32 thiszone;     /* gmt to local correction */
+        bpf_u_int32 sigfigs;    /* accuracy of timestamps */
+        bpf_u_int32 snaplen;    /* max length saved portion of each pkt */
+        bpf_u_int32 linktype;   /* data link type (LINKTYPE_*) */
+};
+
+typedef struct pcap_pkthdr_s 
+{
+        bpf_u_int32 ts_sec;         /* timestamp seconds */
+        bpf_u_int32 ts_usec;        /* timestamp microseconds */
+        bpf_u_int32 incl_len;       /* number of octets of packet saved in file */
+        bpf_u_int32 orig_len;       /* actual length of packet */
+} pcap_pkthdr_t;
+
+//create global file pcap header
+struct pcap_file_header* pls_pcap_gl_header(void)
+{
+	static struct pcap_file_header hdr;
+
+	memset(&hdr, 0x0, sizeof(hdr));
+	hdr.magic = 0xa1b23c4d;		//nanosecond magic. common magic: 0xa1b2c3d4
+	hdr.version_major = 2;
+	hdr.version_minor = 4;
+	hdr.thiszone = 0;
+	hdr.sigfigs = 0;
+	hdr.snaplen = 65535;
+	hdr.linktype = 1;		//ethernet
+
+	return &hdr;
+}
+
+int pls_pcap_file_create(char *name)
+{
+	int rv;
+	void *p;
+	unsigned int off = 0;
+
+	//int creat(const char *pathname, mode_t mode);
+	rv = creat(name, 666);
+	if (rv < 0)
+	{
+		printf("error during creating file\n");
+		return rv;
+	}
+
+	p = malloc(MB);
+	if (!p)
+	{
+		printf("error during ram allocation\n");
+		rv = -1; return rv;
+	}
+
+	memset(p, 0x0, MB);
+	memcpy(p, pls_pcap_gl_header(), sizeof(struct pcap_file_header));
+	off += sizeof(struct pcap_file_header);
+
+	hexdump(p, sizeof(struct pcap_file_header));
+
+	
+
+	return rv;
+}
+
+//------------------------------------------------------------------------------
 
 //this callback called when write is completed
 static void pls_bdev_write_done_cb(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg)
