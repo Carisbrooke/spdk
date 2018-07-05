@@ -19,7 +19,7 @@
 #include "spdk/string.h"
 #include "spdk/queue.h"
 
-#define VERSION "0.81"
+#define VERSION "0.86"
 #define MB 1048576
 #define K4 4096
 #define SHM_PKT_POOL_BUF_SIZE  1856
@@ -27,10 +27,16 @@
 #define NVME_MAX_BDEVS_PER_RPC 32
 #define MAX_PACKET_SIZE 1600
 #define DEVICE_NAME "s4msung"
-#define NUM_THREADS 4
-#define NUM_INPUT_Q 4
-#define BUFFER_SIZE 524288
-#define THREAD_LIMIT 0x100000000	//space for every thread to write
+#define NUM_THREADS 2
+#define NUM_INPUT_Q 2
+
+//#define BUFFER_SIZE 524288
+#define BUFFER_SIZE 2048
+//#define THREAD_LIMIT 0x100000000	//space for every thread to write
+#define THREAD_LIMIT 0x900		//space for every thread to write
+
+//OPTIONS
+#define DUMP_PACKET
 #define DEBUG
 
 #ifdef DEBUG
@@ -514,6 +520,7 @@ void* init_thread(void *arg)
 	uint64_t thread_limit;
 	uint64_t position = 0;
 	int pkt_len;
+	unsigned short len;
 	void *bf;
 	//odp
 	odp_event_t ev;
@@ -600,7 +607,11 @@ void* init_thread(void *arg)
 		if (!odp_packet_is_valid(pkt))
 			continue;
 		pkt_len = (int)odp_packet_len(pkt);
-		//debug("got packet with len: %d\n", pkt_len);
+
+#ifdef DUMP_PACKET
+		debug("got packet with len: %d\n", pkt_len);
+		hexdump(odp_packet_l2_ptr(pkt, NULL), pkt_len);
+#endif
 		if (pkt_len > MAX_PACKET_SIZE)
 		{
 			printf("dropping big packet with size: %d \n", pkt_len);
@@ -610,10 +621,17 @@ void* init_thread(void *arg)
 		//in position we count num of bytes copied into buffer. 
 		if (pkt_len)
 		{
-			if (position+pkt_len < nbytes)
+			if (position + pkt_len + 3 < nbytes) //3 bytes for 0xEE and pkt_len
 			{
 				//debug("copying packet\n");
+				//creating raw format header
+				t->buf[position++] = 0xEE;
+				len = (unsigned short)pkt_len;
+				t->buf[position++] = len >> 8;
+				t->buf[position++] = len & 0x00FF;
+				//copying odp packet 
 				memcpy(t->buf+position, odp_packet_l2_ptr(pkt, NULL), pkt_len);
+				hexdump(t->buf+position-3, pkt_len+3);
 				odp_schedule_release_atomic();
 				position += pkt_len;
 			}
@@ -636,7 +654,7 @@ void* init_thread(void *arg)
 						return NULL;
 				}
 
-				debug("writing %lu bytes from thread# #%d, offset: 0x%lx\n",
+				printf("writing %lu bytes from thread# #%d, offset: 0x%lx\n",
 					nbytes, t->idx, offset);
 				t->offset = offset; //for stats
 				rv = spdk_bdev_write(t->pls_target.desc, t->pls_target.ch, 
@@ -707,8 +725,11 @@ read:
 			usleep(10);
 		}
 
+		//XXX - parse packets here and create pcap
+		//in bf pointer we have buf with data read
+
 		//print dump
-		hexdump(bf, 128);
+		hexdump(bf, 2048);
 
 		spdk_dma_free(bf);
 	}
