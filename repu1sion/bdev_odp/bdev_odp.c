@@ -19,7 +19,7 @@
 #include "spdk/string.h"
 #include "spdk/queue.h"
 
-#define VERSION "0.86"
+#define VERSION "0.87"
 #define MB 1048576
 #define K4 4096
 #define SHM_PKT_POOL_BUF_SIZE  1856
@@ -30,6 +30,7 @@
 #define NUM_THREADS 2
 #define NUM_INPUT_Q 2
 
+#define FILE_NAME "dump.pcap"
 //#define BUFFER_SIZE 524288
 #define BUFFER_SIZE 2048
 //#define THREAD_LIMIT 0x100000000	//space for every thread to write
@@ -97,9 +98,12 @@ odp_pktio_t pktio;
 odp_pktin_queue_param_t pktin_param;
 odp_queue_t inq[NUM_INPUT_Q] = {0};	//keep handles to queues here
 
-void hexdump(void *, unsigned int );
+void hexdump(void*, unsigned int );
+
 struct pcap_file_header* pls_pcap_gl_header(void);
-int pls_pcap_file_create(char *);
+int pls_pcap_file_create(char*);
+int pls_pcap_create(void*);
+
 int init(void);
 void* init_thread(void*);
 int init_spdk(void);
@@ -181,6 +185,7 @@ struct pcap_file_header* pls_pcap_gl_header(void)
 	return &hdr;
 }
 
+//@name - filename, @buf - OUT ptr to buffer. returns file descriptor
 int pls_pcap_file_create(char *name)
 {
 	int rv;
@@ -208,10 +213,77 @@ int pls_pcap_file_create(char *name)
 
 	hexdump(p, sizeof(struct pcap_file_header));
 
-	
+	//buf = p;
 
 	return rv;
 }
+
+//general function, takes buf, parses it, creates pcap file, etc.
+//if no pcap file - creates it, if exists - adds to the current
+int pls_pcap_create(void *bf)
+{
+	int i, rv = 0, fd = 0;
+	unsigned char *p = (unsigned char*)bf;
+	static bool firstrun = true;
+	bool new_packet = false;
+	bool new_len = false;
+	unsigned short len = 0;
+	pcap_pkthdr_t pkthdr;
+
+	if (firstrun)
+	{
+		rv = pls_pcap_file_create(FILE_NAME);
+		if (rv <= 0)
+		{
+			printf("failed to create file %s\n", FILE_NAME);
+			return rv;
+		}
+		fd = rv;
+		firstrun = false;
+	}
+	
+	//parsing packets
+	for (i = 0; i < BUFFER_SIZE; i++)
+	{
+		if (p[i] == 0xEE)
+		{
+			new_packet = true;
+			continue;
+		}
+		if (new_packet)
+		{
+			len = p[i] << 8;
+			i++;
+			len |= p[i];
+			new_packet = false;
+			new_len = true; 
+			printf("new packet len: %d \n", len);
+			continue;
+		}
+		if (new_len)
+		{
+			memset(&pkthdr, 0x0, sizeof(pcap_pkthdr_t));
+			pkthdr.incl_len = pkthdr.orig_len = len;
+			rv = write(fd, &pkthdr, sizeof(pcap_pkthdr_t));
+			if (rv < 0)
+			{
+				printf("write to file failed!\n");
+				return rv;
+			}
+			//write whole packet here
+			rv = write(fd, p+i, len);
+			if (rv < 0)
+			{
+				printf("write to file failed!\n");
+				return rv;
+			}
+			new_len = false;
+		}
+	}
+
+	return rv;
+}
+
 
 //------------------------------------------------------------------------------
 
@@ -727,6 +799,11 @@ read:
 
 		//XXX - parse packets here and create pcap
 		//in bf pointer we have buf with data read
+		int r = pls_pcap_create(bf);
+		if (r)
+		{
+			printf("error creating pcap\n");
+		}
 
 		//print dump
 		hexdump(bf, 2048);
