@@ -19,7 +19,7 @@
 #include "spdk/string.h"
 #include "spdk/queue.h"
 
-#define VERSION "0.87"
+#define VERSION "0.88"
 #define MB 1048576
 #define K4 4096
 #define SHM_PKT_POOL_BUF_SIZE  1856
@@ -188,11 +188,12 @@ struct pcap_file_header* pls_pcap_gl_header(void)
 //@name - filename, @buf - OUT ptr to buffer. returns file descriptor
 int pls_pcap_file_create(char *name)
 {
-	int rv;
+	int rv, fd;
 	void *p;
 	unsigned int off = 0;
 
-	//int creat(const char *pathname, mode_t mode);
+	printf("%s() called \n", __func__);
+
 	rv = creat(name, 666);
 	if (rv < 0)
 	{
@@ -211,11 +212,21 @@ int pls_pcap_file_create(char *name)
 	memcpy(p, pls_pcap_gl_header(), sizeof(struct pcap_file_header));
 	off += sizeof(struct pcap_file_header);
 
+	printf("pcap global file header dump:\n");
 	hexdump(p, sizeof(struct pcap_file_header));
 
 	//buf = p;
 
-	return rv;
+	//writing pcap global header to file
+	fd = rv;
+	rv = write(fd, p, sizeof(struct pcap_file_header));
+	if (rv < 0)
+	{
+		printf("write to file failed!\n");
+		return rv;
+	}
+
+	return fd;
 }
 
 //general function, takes buf, parses it, creates pcap file, etc.
@@ -229,6 +240,8 @@ int pls_pcap_create(void *bf)
 	bool new_len = false;
 	unsigned short len = 0;
 	pcap_pkthdr_t pkthdr;
+
+	printf("%s() called \n", __func__);
 
 	if (firstrun)
 	{
@@ -281,9 +294,8 @@ int pls_pcap_create(void *bf)
 		}
 	}
 
-	return rv;
+	return 0;	//in case of error - we return rv before, so always 0 here
 }
-
 
 //------------------------------------------------------------------------------
 
@@ -806,7 +818,7 @@ read:
 		}
 
 		//print dump
-		hexdump(bf, 2048);
+		//hexdump(bf, 2048);
 
 		spdk_dma_free(bf);
 	}
