@@ -609,6 +609,7 @@ void* init_thread(void *arg)
 	//odp
 	odp_event_t ev;
 	odp_packet_t pkt;
+	odp_time_t time;
 
 	//init offset
 	offset = t->idx * 0x100000000; //each thread has a 4 Gb of space
@@ -691,6 +692,14 @@ void* init_thread(void *arg)
 		if (!odp_packet_is_valid(pkt))
 			continue;
 		pkt_len = (int)odp_packet_len(pkt);
+		//getting timestamp
+		rv = odp_packet_has_ts(pkt);
+		if (rv)
+			printf("packet HAS a timestamp\n");
+		else
+			printf("packet has NO timestamp\n");
+		time = odp_packet_ts(pkt);
+		printf("odp packet timestamp is %lu \n", time.nsec);
 
 #ifdef DUMP_PACKET
 		debug("got packet with len: %d\n", pkt_len);
@@ -715,7 +724,9 @@ void* init_thread(void *arg)
 				t->buf[position++] = len & 0x00FF;
 				//copying odp packet 
 				memcpy(t->buf+position, odp_packet_l2_ptr(pkt, NULL), pkt_len);
+#ifdef DUMP_PACKET
 				hexdump(t->buf+position-3, pkt_len+3);
+#endif
 				odp_schedule_release_atomic();
 				position += pkt_len;
 			}
