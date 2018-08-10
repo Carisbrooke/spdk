@@ -19,7 +19,7 @@
 #include "spdk/string.h"
 #include "spdk/queue.h"
 
-#define VERSION "0.88"
+#define VERSION "0.90"
 #define MB 1048576
 #define K4 4096
 #define SHM_PKT_POOL_BUF_SIZE  1856
@@ -27,12 +27,13 @@
 #define NVME_MAX_BDEVS_PER_RPC 32
 #define MAX_PACKET_SIZE 1600
 #define DEVICE_NAME "s4msung"
-#define NUM_THREADS 2
-#define NUM_INPUT_Q 2
+#define NUM_THREADS 1
+#define NUM_INPUT_Q 1
 
+#define EE_HEADER_SIZE 11
 #define FILE_NAME "dump.pcap"
 //#define BUFFER_SIZE 524288
-#define BUFFER_SIZE 2048
+#define BUFFER_SIZE 1024
 //#define THREAD_LIMIT 0x100000000	//space for every thread to write
 #define THREAD_LIMIT 0x900		//space for every thread to write
 
@@ -233,12 +234,13 @@ int pls_pcap_file_create(char *name)
 //if no pcap file - creates it, if exists - adds to the current
 int pls_pcap_create(void *bf)
 {
-	int i, rv = 0, fd = 0;
+	int i, j, rv = 0, fd = 0;
 	unsigned char *p = (unsigned char*)bf;
 	static bool firstrun = true;
 	bool new_packet = false;
 	bool new_len = false;
 	unsigned short len = 0;
+	uint64_t ts = 0, t = 0;
 	pcap_pkthdr_t pkthdr;
 
 	printf("%s() called \n", __func__);
@@ -265,18 +267,32 @@ int pls_pcap_create(void *bf)
 		}
 		if (new_packet)
 		{
+			//getting timestamp
+			for (j = 0; j < 8; j++)
+			{
+				t = (uint64_t)p[i+j];
+				ts |= t << 8*(7-j);
+				//ts |= p[i+j] << 8*(7-j);
+				printf("j: %d, ts: 0x%lx \n", j, ts);
+			}
+			i += 8;
+
 			len = p[i] << 8;
 			i++;
 			len |= p[i];
 			new_packet = false;
 			new_len = true; 
-			printf("new packet len: %d \n", len);
+			printf("new packet len: %d , ts: %lu \n", len, ts);
 			continue;
 		}
 		if (new_len)
 		{
 			memset(&pkthdr, 0x0, sizeof(pcap_pkthdr_t));
 			pkthdr.incl_len = pkthdr.orig_len = len;
+			pkthdr.ts_sec = (bpf_u_int32)(ts / 1000000000);
+			pkthdr.ts_usec = (bpf_u_int32)(ts % 1000000000);
+			debug("len: %u, ts_sec: %u, ts_usec: %u \n", 
+				pkthdr.orig_len, pkthdr.ts_sec, pkthdr.ts_usec);
 			rv = write(fd, &pkthdr, sizeof(pcap_pkthdr_t));
 			if (rv < 0)
 			{
@@ -611,6 +627,7 @@ void* init_thread(void *arg)
 	odp_packet_t pkt;
 	odp_time_t time;
 
+
 	//init offset
 	offset = t->idx * 0x100000000; //each thread has a 4 Gb of space
 	thread_limit = offset + THREAD_LIMIT;
@@ -694,12 +711,21 @@ void* init_thread(void *arg)
 		pkt_len = (int)odp_packet_len(pkt);
 		//getting timestamp
 		rv = odp_packet_has_ts(pkt);
+#if 0
 		if (rv)
 			printf("packet HAS a timestamp\n");
 		else
 			printf("packet has NO timestamp\n");
-		time = odp_packet_ts(pkt);
-		printf("odp packet timestamp is %lu \n", time.nsec);
+#endif
+
+		//converting HW timestamp to system time
+		if (rv)
+		{
+			time = odp_packet_ts(pkt);
+			debug("odp packet timestamp is %lu \n", time.nsec);
+		}
+		else
+			time.nsec = 0;
 
 #ifdef DUMP_PACKET
 		debug("got packet with len: %d\n", pkt_len);
@@ -714,18 +740,29 @@ void* init_thread(void *arg)
 		//in position we count num of bytes copied into buffer. 
 		if (pkt_len)
 		{
-			if (position + pkt_len + 3 < nbytes) //3 bytes for 0xEE and pkt_len
+			if (position + pkt_len + EE_HEADER_SIZE < nbytes)
 			{
 				//debug("copying packet\n");
-				//creating raw format header
+				//creating raw format header. 0xEE - magic byte (1byte)
 				t->buf[position++] = 0xEE;
+				//timestamp in uint64_t saved as big endian (8bytes)
+				t->buf[position++] = time.nsec >> 56 & 0xFF;
+				t->buf[position++] = time.nsec >> 48 & 0xFF;
+				t->buf[position++] = time.nsec >> 40 & 0xFF;
+				t->buf[position++] = time.nsec >> 32 & 0xFF;
+				t->buf[position++] = time.nsec >> 24 & 0xFF;
+				t->buf[position++] = time.nsec >> 16 & 0xFF;
+				t->buf[position++] = time.nsec >> 8 & 0xFF;
+				t->buf[position++] = time.nsec & 0xFF;
+				
+				//packet len (2bytes)
 				len = (unsigned short)pkt_len;
 				t->buf[position++] = len >> 8;
 				t->buf[position++] = len & 0x00FF;
 				//copying odp packet 
 				memcpy(t->buf+position, odp_packet_l2_ptr(pkt, NULL), pkt_len);
 #ifdef DUMP_PACKET
-				hexdump(t->buf+position-3, pkt_len+3);
+				hexdump(t->buf+position-EE_HEADER_SIZE , pkt_len+EE_HEADER_SIZE);
 #endif
 				odp_schedule_release_atomic();
 				position += pkt_len;
@@ -820,7 +857,7 @@ read:
 			usleep(10);
 		}
 
-		//XXX - parse packets here and create pcap
+		//parsing packets here and creating pcap
 		//in bf pointer we have buf with data read
 		int r = pls_pcap_create(bf);
 		if (r)
