@@ -19,7 +19,7 @@
 #include "spdk/string.h"
 #include "spdk/queue.h"
 
-#define VERSION "0.90"
+#define VERSION "0.901"
 #define MB 1048576
 #define K4 4096
 #define SHM_PKT_POOL_BUF_SIZE  1856
@@ -36,6 +36,7 @@
 #define BUFFER_SIZE 1024
 //#define THREAD_LIMIT 0x100000000	//space for every thread to write
 #define THREAD_LIMIT 0x900		//space for every thread to write
+#define READ_LIMIT 0x800		//space for every thread to read
 
 //OPTIONS
 #define DUMP_PACKET
@@ -268,6 +269,7 @@ int pls_pcap_create(void *bf)
 		if (new_packet)
 		{
 			//getting timestamp
+			ts = 0;
 			for (j = 0; j < 8; j++)
 			{
 				t = (uint64_t)p[i+j];
@@ -619,6 +621,7 @@ void* init_thread(void *arg)
 	uint64_t offset;
 	uint64_t thread_limit;
 	uint64_t position = 0;
+	static uint64_t readbytes = 0;
 	int pkt_len;
 	unsigned short len;
 	void *bf;
@@ -849,6 +852,7 @@ read:
 		else
 		{
 			offset += nbytes;
+			readbytes += nbytes;
 			printf("spdk_bdev_read NO errors\n");
 		}
 		//need to wait for bdev read completion first
@@ -869,6 +873,13 @@ read:
 		//hexdump(bf, 2048);
 
 		spdk_dma_free(bf);
+
+		//exit in case we read enough
+		if (readbytes >= READ_LIMIT)
+		{
+			printf("read is over\n");
+			break;
+		}
 	}
 
 #endif
