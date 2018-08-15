@@ -19,7 +19,7 @@
 #include "spdk/string.h"
 #include "spdk/queue.h"
 
-#define VERSION "0.901"
+#define VERSION "0.92"
 #define MB 1048576
 #define K4 4096
 #define SHM_PKT_POOL_BUF_SIZE  1856
@@ -27,20 +27,21 @@
 #define NVME_MAX_BDEVS_PER_RPC 32
 #define MAX_PACKET_SIZE 1600
 #define DEVICE_NAME "s4msung"
-#define NUM_THREADS 1
-#define NUM_INPUT_Q 1
+#define NUM_THREADS 4
+#define NUM_INPUT_Q 4
 
 #define EE_HEADER_SIZE 11
 #define FILE_NAME "dump.pcap"
-//#define BUFFER_SIZE 524288
-#define BUFFER_SIZE 1024
-//#define THREAD_LIMIT 0x100000000	//space for every thread to write
-#define THREAD_LIMIT 0x900		//space for every thread to write
-#define READ_LIMIT 0x800		//space for every thread to read
+#define BUFFER_SIZE 1048576
+//#define BUFFER_SIZE 1024
+#define THREAD_OFFSET 0x100000000	//4Gb of offset for every thread 
+#define THREAD_LIMIT 0x100000000	//space for every thread to write
+//#define THREAD_LIMIT 0x900		//space for every thread to write
+#define READ_LIMIT 0x100000000		//space for every thread to read
 
 //OPTIONS
-#define DUMP_PACKET
-#define DEBUG
+//#define DUMP_PACKET
+//#define DEBUG
 
 #ifdef DEBUG
  #define debug(x...) printf(x)
@@ -194,7 +195,7 @@ int pls_pcap_file_create(char *name)
 	void *p;
 	unsigned int off = 0;
 
-	printf("%s() called \n", __func__);
+	debug("%s() called \n", __func__);
 
 	rv = creat(name, 666);
 	if (rv < 0)
@@ -235,7 +236,8 @@ int pls_pcap_file_create(char *name)
 //if no pcap file - creates it, if exists - adds to the current
 int pls_pcap_create(void *bf)
 {
-	int i, j, rv = 0, fd = 0;
+	int i, j, rv = 0;
+	static int fd = 0;
 	unsigned char *p = (unsigned char*)bf;
 	static bool firstrun = true;
 	bool new_packet = false;
@@ -244,7 +246,7 @@ int pls_pcap_create(void *bf)
 	uint64_t ts = 0, t = 0;
 	pcap_pkthdr_t pkthdr;
 
-	printf("%s() called \n", __func__);
+	//debug("%s() called \n", __func__);
 
 	if (firstrun)
 	{
@@ -274,8 +276,7 @@ int pls_pcap_create(void *bf)
 			{
 				t = (uint64_t)p[i+j];
 				ts |= t << 8*(7-j);
-				//ts |= p[i+j] << 8*(7-j);
-				printf("j: %d, ts: 0x%lx \n", j, ts);
+				//printf("j: %d, ts: 0x%lx \n", j, ts);
 			}
 			i += 8;
 
@@ -284,7 +285,7 @@ int pls_pcap_create(void *bf)
 			len |= p[i];
 			new_packet = false;
 			new_len = true; 
-			printf("new packet len: %d , ts: %lu \n", len, ts);
+			debug("new packet len: %d , ts: %lu \n", len, ts);
 			continue;
 		}
 		if (new_len)
@@ -298,14 +299,14 @@ int pls_pcap_create(void *bf)
 			rv = write(fd, &pkthdr, sizeof(pcap_pkthdr_t));
 			if (rv < 0)
 			{
-				printf("write to file failed!\n");
+				//printf("write to file failed!\n");
 				return rv;
 			}
 			//write whole packet here
 			rv = write(fd, p+i, len);
 			if (rv < 0)
 			{
-				printf("write to file failed!\n");
+				//printf("write to file failed!\n");
 				return rv;
 			}
 			new_len = false;
@@ -357,7 +358,7 @@ static void pls_bdev_read_done_cb(struct spdk_bdev_io *bdev_io, bool success, vo
 	{
 		t->read_complete = true;
 		__atomic_fetch_add(&cnt, 1, __ATOMIC_SEQ_CST);
-		debug("read completed successfully\n");
+		//debug("read completed successfully\n");
 	}
 	else
 		printf("read failed\n");
@@ -632,7 +633,7 @@ void* init_thread(void *arg)
 
 
 	//init offset
-	offset = t->idx * 0x100000000; //each thread has a 4 Gb of space
+	offset = t->idx * THREAD_OFFSET; //each thread has a 4 Gb of space
 	thread_limit = offset + THREAD_LIMIT;
 	printf("%s() called from thread #%d. offset: 0x%lx\n", __func__, t->idx, offset);
 
@@ -846,14 +847,14 @@ read:
 		t->read_complete = false;
 		rv = spdk_bdev_read(t->pls_target.desc, t->pls_target.ch,
 			bf, offset, nbytes, pls_bdev_read_done_cb, t);
-		printf("after spdk read\n");
+		//printf("after spdk read\n");
 		if (rv)
 			printf("spdk_bdev_read failed\n");
 		else
 		{
 			offset += nbytes;
 			readbytes += nbytes;
-			printf("spdk_bdev_read NO errors\n");
+			//printf("spdk_bdev_read NO errors\n");
 		}
 		//need to wait for bdev read completion first
 		while(t->read_complete == false)
@@ -863,6 +864,7 @@ read:
 
 		//parsing packets here and creating pcap
 		//in bf pointer we have buf with data read
+		//writing to .pcap file is also here
 		int r = pls_pcap_create(bf);
 		if (r)
 		{
