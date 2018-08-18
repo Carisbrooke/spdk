@@ -19,7 +19,7 @@
 #include "spdk/string.h"
 #include "spdk/queue.h"
 
-#define VERSION "0.92"
+#define VERSION "0.93"
 #define MB 1048576
 #define K4 4096
 #define SHM_PKT_POOL_BUF_SIZE  1856
@@ -48,6 +48,20 @@
 #else
  #define debug(x...)
 #endif
+
+typedef enum {MODE_READ, MODE_WRITE, MODE_RW} mode_e;
+
+typedef struct global_s
+{
+	mode_e mode;
+	char *pci_nvme_addr;
+} global_t;
+
+static global_t global = 
+{
+	.mode = MODE_WRITE,
+	.pci_nvme_addr = "0000:02:00.0",
+};
 
 /* Used to pass messages between fio threads */
 struct pls_msg {
@@ -87,7 +101,6 @@ struct pls_poller
 	TAILQ_ENTRY(pls_poller)	link;
 };
 
-char *pci_nvme_addr = "0000:02:00.0";
 const char *names[NVME_MAX_BDEVS_PER_RPC];
 pls_thread_t pls_ctrl_thread;
 pls_thread_t pls_thread[NUM_THREADS];
@@ -560,7 +573,7 @@ int init_spdk(void)
 	//fill up trid.
 	trid.trtype = SPDK_NVME_TRANSPORT_PCIE;
 	trid.adrfam = 0;
-	memcpy(trid.traddr, pci_nvme_addr, strlen(pci_nvme_addr));
+	memcpy(trid.traddr, global.pci_nvme_addr, strlen(global.pci_nvme_addr));
 	
 	printf("creating bdev device...\n");
 	//in names returns names of created devices, in count returns number of devices
@@ -691,6 +704,14 @@ void* init_thread(void *arg)
 	//odp thread init
 	rv = odp_init_local(odp_instance, ODP_THREAD_WORKER);
 
+	if (global.mode == MODE_READ)
+	{
+		if (t->idx == 0)
+			goto read;
+		else
+			return NULL;
+	}
+
 	while(1)
 	{
 		//1. if no buffer - allocate it
@@ -784,10 +805,10 @@ void* init_thread(void *arg)
 						t->buf = NULL;
 					}
 					//in case of thread id 0 we do reading, other threads just quit
-					if (t->idx == 0)
-						goto read;
-					else
-						return NULL;
+					if (global.mode == MODE_READ || global.mode == MODE_RW)
+						if (t->idx == 0)
+							goto read;
+					return NULL;
 				}
 
 				printf("writing %lu bytes from thread# #%d, offset: 0x%lx\n",
@@ -826,9 +847,7 @@ void* init_thread(void *arg)
 		odp_packet_free(pkt);
 	}
 
-#if 1
 read:
-
 	//wait before reading data back
 	sleep(1);
 
@@ -884,17 +903,41 @@ read:
 		}
 	}
 
-#endif
 	return NULL;
 }
 
+//first param - mode. could be: r,w,b (read, write, both)
 int main(int argc, char *argv[])
 {
 	int rv = 0;
 	int i;
 	size_t count;
+	char mode = 'w';
 
 	printf("version: %s\n", VERSION);
+
+	if (argc == 2)
+	{
+		mode = argv[1][0];
+		printf("param: %c \n", mode);
+	}
+	
+	switch (mode)
+	{
+		case 'w':
+			global.mode = MODE_WRITE;
+			break;
+		case 'r':
+			global.mode = MODE_READ;
+			break;
+		case 'b':
+			global.mode = MODE_RW;
+			break;
+		default:
+			global.mode = MODE_WRITE;
+			break;
+	}
+	printf("global.mode: %d \n", global.mode);
 
 	//enable logging
 	spdk_log_set_print_level(SPDK_LOG_DEBUG);
