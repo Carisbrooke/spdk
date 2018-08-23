@@ -3,6 +3,7 @@
 
 #include <stdio.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 #include <pthread.h>
 
 #include <odp_api.h>
@@ -19,7 +20,7 @@
 #include "spdk/string.h"
 #include "spdk/queue.h"
 
-#define VERSION "0.93"
+#define VERSION "0.94"
 #define MB 1048576
 #define K4 4096
 #define SHM_PKT_POOL_BUF_SIZE  1856
@@ -84,6 +85,7 @@ typedef struct pls_thread_s
 	bool read_complete;		//flag, false when read callback not finished, else - tru
         unsigned char *buf;
 	uint64_t offset;		//just for stats
+	atomic_ulong a_offset;		//atomic offset for id 0 thread
 	pthread_t pthread_desc;
         struct spdk_thread *thread; /* spdk thread context */
         struct spdk_ring *ring; /* ring for passing messages to this thread */
@@ -103,6 +105,7 @@ struct pls_poller
 
 const char *names[NVME_MAX_BDEVS_PER_RPC];
 pls_thread_t pls_ctrl_thread;
+pls_thread_t pls_read_thread;
 pls_thread_t pls_thread[NUM_THREADS];
 
 //odp stuff -----
@@ -122,6 +125,7 @@ int pls_pcap_create(void*);
 
 int init(void);
 void* init_thread(void*);
+void* init_read_thread(void *arg);
 int init_spdk(void);
 int init_odp(void);
 
@@ -366,7 +370,7 @@ static void pls_bdev_read_done_cb(struct spdk_bdev_io *bdev_io, bool success, vo
 	static unsigned int cnt = 0;
 	pls_thread_t *t = (pls_thread_t*)cb_arg;
 
-	debug("bdev read is done\n");
+	//printf("bdev read is done\n");
 	if (success)
 	{
 		t->read_complete = true;
@@ -627,6 +631,135 @@ int init_odp(void)
 	return rv;
 }
 
+void* init_read_thread(void *arg)
+{
+	int rv = 0;
+	uint64_t nbytes = BUFFER_SIZE;
+	pls_thread_t *t = &pls_read_thread;
+	pls_thread_t *t0 = &pls_thread[0];	//ptr to writer0 thread
+	uint64_t offset;
+	uint64_t thread_limit;
+	static uint64_t readbytes = 0;
+	void *bf;
+
+	//init offset
+	offset = 0;
+	thread_limit = offset + READ_LIMIT;
+
+	t->ring = spdk_ring_create(SPDK_RING_TYPE_MP_SC, 4096, SPDK_ENV_SOCKET_ID_ANY);
+	if (!t->ring) 
+	{
+		printf("failed to allocate ring\n");
+		rv = -1; return NULL;
+	}
+
+	// Initializes the calling(current) thread for I/O channel allocation
+	/* typedef void (*spdk_thread_pass_msg)(spdk_thread_fn fn, void *ctx,
+				     void *thread_ctx); */
+	
+	t->thread = spdk_allocate_thread(pls_send_msg, pls_start_poller,
+                                 pls_stop_poller, (void*)t, "pls_worker_thread");
+
+        if (!t->thread) 
+	{
+                spdk_ring_free(t->ring);
+                SPDK_ERRLOG("failed to allocate thread\n");
+                return NULL;
+        }
+
+	TAILQ_INIT(&t->pollers);
+
+	t->pls_target.bd = spdk_bdev_get_by_name(names[0]); //XXX - we always try to open device with idx 0
+	if (!t->pls_target.bd)
+	{
+		printf("failed to get device\n");
+		rv = 1; return NULL;
+	}
+	else
+		printf("got device with name %s\n", names[0]);
+
+	//returns a descriptor
+	rv = spdk_bdev_open(t->pls_target.bd, 1, NULL, NULL, &t->pls_target.desc);
+	if (rv)
+	{
+		printf("failed to open device\n");
+		return NULL;
+	}
+
+	printf("open io channel\n");
+	t->pls_target.ch = spdk_bdev_get_io_channel(t->pls_target.desc);
+	if (!t->pls_target.ch) 
+	{
+		printf("Unable to get I/O channel for bdev.\n");
+		spdk_bdev_close(t->pls_target.desc);
+		rv = -1; return NULL;
+	}
+
+	printf("read thread started\n");
+
+	while(1)
+	{
+		bf = spdk_dma_zmalloc(nbytes, 0, NULL);
+		if (!bf)
+		{
+			printf("failed to allocate RAM for reading\n");
+			return NULL;
+		}
+		t->read_complete = false;
+
+		//wait here till write thread with id 0 do some writing
+		while (offset + BUFFER_SIZE > t0->a_offset)
+		{
+			printf("read wait. read_offset: 0x%lx , write_offset: 0x%lx \n",
+				offset, t0->a_offset);
+			usleep(1000000);		
+		}
+
+		printf("read now. read_offset: 0x%lx , write_offset: 0x%lx \n",
+			offset, t0->a_offset);
+
+		rv = spdk_bdev_read(t->pls_target.desc, t->pls_target.ch,
+			bf, offset, nbytes, pls_bdev_read_done_cb, t);
+		//printf("after spdk read\n");
+		if (rv)
+			printf("spdk_bdev_read failed\n");
+		else
+		{
+			offset += nbytes;
+			readbytes += nbytes;
+			//printf("spdk_bdev_read NO errors\n");
+		}
+		//need to wait for bdev read completion first
+		while(t->read_complete == false)
+		{
+			usleep(10);
+		}
+
+		//parsing packets here and creating pcap
+		//in bf pointer we have buf with data read
+		//writing to .pcap file is also here
+		int r = pls_pcap_create(bf);
+		if (r)
+		{
+			printf("error creating pcap\n");
+		}
+
+		//print dump
+		//hexdump(bf, 2048);
+
+		spdk_dma_free(bf);
+
+		//exit in case we read enough
+		if (readbytes >= thread_limit)
+		{
+			printf("read is over\n");
+			break;
+		}
+	}
+
+	return NULL;
+}
+
 void* init_thread(void *arg)
 {
 	int rv = 0;
@@ -644,9 +777,9 @@ void* init_thread(void *arg)
 	odp_packet_t pkt;
 	odp_time_t time;
 
-
 	//init offset
 	offset = t->idx * THREAD_OFFSET; //each thread has a 4 Gb of space
+	t->a_offset = offset;
 	thread_limit = offset + THREAD_LIMIT;
 	printf("%s() called from thread #%d. offset: 0x%lx\n", __func__, t->idx, offset);
 
@@ -805,7 +938,7 @@ void* init_thread(void *arg)
 						t->buf = NULL;
 					}
 					//in case of thread id 0 we do reading, other threads just quit
-					if (global.mode == MODE_READ || global.mode == MODE_RW)
+					if (global.mode == MODE_READ /*|| global.mode == MODE_RW*/)
 						if (t->idx == 0)
 							goto read;
 					return NULL;
@@ -813,7 +946,8 @@ void* init_thread(void *arg)
 
 				printf("writing %lu bytes from thread# #%d, offset: 0x%lx\n",
 					nbytes, t->idx, offset);
-				t->offset = offset; //for stats
+				t->offset = offset;
+				t->a_offset = offset;
 				rv = spdk_bdev_write(t->pls_target.desc, t->pls_target.ch, 
 					t->buf, offset, /*position*/ nbytes, pls_bdev_write_done_cb, t);
 				if (rv)
@@ -970,10 +1104,23 @@ int main(int argc, char *argv[])
 		rv = pthread_create(&pls_thread[i].pthread_desc, NULL, init_thread, &pls_thread[i]);
 		if (rv)
 		{
-			printf("open_dev failed. exiting\n");
+			printf("thread creation failed. exiting\n");
 			exit(1);
 		}
 	}
+	sleep(1);
+
+	//creating read thread for RW mode, to read in parallel
+	if (global.mode == MODE_RW)
+	{
+		rv = pthread_create(&pls_read_thread.pthread_desc, NULL, init_read_thread, NULL);
+		if (rv)
+		{
+			printf("reading thread creation failed. exiting\n");
+			exit(1);
+		}
+	}
+
 	sleep(1);
 
 	//need this poll loop to get callbacks after I/O completions
@@ -985,6 +1132,8 @@ int main(int argc, char *argv[])
 			if (count)
 				printf("got %zu messages from thread %d\n", count, i);
 		}
+		//poll read thread
+		pls_poll_thread(&pls_read_thread);
 
 		usleep(10);
 	}
