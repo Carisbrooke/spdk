@@ -20,7 +20,7 @@
 #include "spdk/string.h"
 #include "spdk/queue.h"
 
-#define VERSION "0.94"
+#define VERSION "0.97"
 #define MB 1048576
 #define K4 4096
 #define SHM_PKT_POOL_BUF_SIZE  1856
@@ -43,6 +43,7 @@
 //OPTIONS
 //#define DUMP_PACKET
 //#define DEBUG
+#define HL_DEBUGS			//high level debugs - on writing buffers and counting callbacks
 
 #ifdef DEBUG
  #define debug(x...) printf(x)
@@ -81,6 +82,7 @@ typedef struct pls_target_s
 
 typedef struct pls_thread_s
 {
+	bool finished;
 	int idx;
 	bool read_complete;		//flag, false when read callback not finished, else - tru
         unsigned char *buf;
@@ -334,6 +336,7 @@ int pls_pcap_create(void *bf)
 }
 
 //------------------------------------------------------------------------------
+atomic_ulong bytes_wrote = 0;
 
 //this callback called when write is completed
 static void pls_bdev_write_done_cb(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg)
@@ -347,14 +350,26 @@ static void pls_bdev_write_done_cb(struct spdk_bdev_io *bdev_io, bool success, v
 		debug("write completed successfully\n");
 		//cnt++;
 		__atomic_fetch_add(&cnt, 1, __ATOMIC_SEQ_CST);
+
+#if 0
+		bytes_wrote += BUFFER_SIZE;
+		now = time(0);
+	        if (now > old)
+                {
+
+
+		}
+#endif
+
 	}
 	else
 		printf("write failed\n");
 
+#ifdef HL_DEBUGS
 	if (cnt % 1000 == 0)
 		printf("have %u successful write callabacks. thread #%d, offset: 0x%lx \n",
 			 cnt, t->idx, t->offset);
-
+#endif
 	debug("before freeing ram in callback at addr: %p \n", t->buf); 
 	spdk_dma_free(t->buf);
 	debug("after freeing ram in callback at addr: %p \n", t->buf); 
@@ -380,10 +395,11 @@ static void pls_bdev_read_done_cb(struct spdk_bdev_io *bdev_io, bool success, vo
 	else
 		printf("read failed\n");
 
+#ifdef HL_DEBUGS
 	if (cnt % 1000 == 0)
 		printf("have %u successful read callabacks. thread #%d, offset: 0x%lx \n",
 			 cnt, t->idx, t->offset);
-
+#endif
 	spdk_bdev_free_io(bdev_io);
 }
 
@@ -708,15 +724,18 @@ void* init_read_thread(void *arg)
 		t->read_complete = false;
 
 		//wait here till write thread with id 0 do some writing
-		while (offset + BUFFER_SIZE > t0->a_offset)
+		if (global.mode == MODE_RW)
 		{
-			printf("read wait. read_offset: 0x%lx , write_offset: 0x%lx \n",
-				offset, t0->a_offset);
-			usleep(1000000);		
-		}
+			while (offset + BUFFER_SIZE > t0->a_offset)
+			{
+				printf("read wait. read_offset: 0x%lx , write_offset: 0x%lx \n",
+					offset, t0->a_offset);
+				usleep(10000);		
+			}
 
-		printf("read now. read_offset: 0x%lx , write_offset: 0x%lx \n",
-			offset, t0->a_offset);
+			printf("read now. read_offset: 0x%lx , write_offset: 0x%lx \n",
+				offset, t0->a_offset);
+		}
 
 		rv = spdk_bdev_read(t->pls_target.desc, t->pls_target.ch,
 			bf, offset, nbytes, pls_bdev_read_done_cb, t);
@@ -768,10 +787,10 @@ void* init_thread(void *arg)
 	uint64_t offset;
 	uint64_t thread_limit;
 	uint64_t position = 0;
-	static uint64_t readbytes = 0;
+	//static uint64_t readbytes = 0;
 	int pkt_len;
 	unsigned short len;
-	void *bf;
+	//void *bf;
 	//odp
 	odp_event_t ev;
 	odp_packet_t pkt;
@@ -837,6 +856,7 @@ void* init_thread(void *arg)
 	//odp thread init
 	rv = odp_init_local(odp_instance, ODP_THREAD_WORKER);
 
+#if 0
 	if (global.mode == MODE_READ)
 	{
 		if (t->idx == 0)
@@ -844,6 +864,7 @@ void* init_thread(void *arg)
 		else
 			return NULL;
 	}
+#endif
 
 	while(1)
 	{
@@ -937,15 +958,18 @@ void* init_thread(void *arg)
 						spdk_dma_free(t->buf);
 						t->buf = NULL;
 					}
+#if 0
 					//in case of thread id 0 we do reading, other threads just quit
 					if (global.mode == MODE_READ /*|| global.mode == MODE_RW*/)
 						if (t->idx == 0)
 							goto read;
+#endif
 					return NULL;
 				}
-
+#ifdef HL_DEBUGS
 				printf("writing %lu bytes from thread# #%d, offset: 0x%lx\n",
 					nbytes, t->idx, offset);
+#endif
 				t->offset = offset;
 				t->a_offset = offset;
 				rv = spdk_bdev_write(t->pls_target.desc, t->pls_target.ch, 
@@ -981,6 +1005,7 @@ void* init_thread(void *arg)
 		odp_packet_free(pkt);
 	}
 
+#if 0
 read:
 	//wait before reading data back
 	sleep(1);
@@ -1036,6 +1061,7 @@ read:
 			break;
 		}
 	}
+#endif
 
 	return NULL;
 }
@@ -1092,26 +1118,30 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
-	rv = odp_pktio_start(pktio);
-	if (rv) exit(1);
-
-	rv = odp_pktin_event_queue(pktio, inq, NUM_INPUT_Q);
-	printf("num of input queues configured: %d \n", rv);
-
-	for (i = 0; i < NUM_THREADS; i++)
+	// do odp init and create write threads only in these modes
+	if (global.mode == MODE_RW || global.mode == MODE_WRITE)
 	{
-		pls_thread[i].idx = i;
-		rv = pthread_create(&pls_thread[i].pthread_desc, NULL, init_thread, &pls_thread[i]);
-		if (rv)
-		{
-			printf("thread creation failed. exiting\n");
-			exit(1);
-		}
-	}
-	sleep(1);
+		rv = odp_pktio_start(pktio);
+		if (rv) exit(1);
 
-	//creating read thread for RW mode, to read in parallel
-	if (global.mode == MODE_RW)
+		rv = odp_pktin_event_queue(pktio, inq, NUM_INPUT_Q);
+		printf("num of input queues configured: %d \n", rv);
+
+		for (i = 0; i < NUM_THREADS; i++)
+		{
+			pls_thread[i].idx = i;
+			rv = pthread_create(&pls_thread[i].pthread_desc, NULL, init_thread, &pls_thread[i]);
+			if (rv)
+			{
+				printf("thread creation failed. exiting\n");
+				exit(1);
+			}
+		}
+		sleep(1);
+	}
+
+	//creating read thread for RW or READ mode, to read in parallel
+	if (global.mode == MODE_RW || global.mode == MODE_READ)
 	{
 		rv = pthread_create(&pls_read_thread.pthread_desc, NULL, init_read_thread, NULL);
 		if (rv)
@@ -1126,34 +1156,70 @@ int main(int argc, char *argv[])
 	//need this poll loop to get callbacks after I/O completions
 	while(1)
 	{
-		for (i = 0; i < NUM_THREADS; i++)
+		if (global.mode == MODE_RW || global.mode == MODE_WRITE)
 		{
-			count = pls_poll_thread(&pls_thread[i]);
-			if (count)
-				printf("got %zu messages from thread %d\n", count, i);
+			for (i = 0; i < NUM_THREADS; i++)
+			{
+				count = pls_poll_thread(&pls_thread[i]);
+				if (count)
+					printf("got %zu messages from thread %d\n", count, i);
+			}
 		}
 		//poll read thread
-		pls_poll_thread(&pls_read_thread);
+		if (global.mode != MODE_WRITE)
+		{
+			pls_poll_thread(&pls_read_thread);
+			if (global.mode == MODE_READ)
+			{
+				rv = pthread_tryjoin_np(pls_read_thread.pthread_desc, NULL);
+				if (!rv)
+					exit(0);
+			}
+		}
 
+		if (global.mode == MODE_WRITE)
+		{
+			for (i = 0; i < NUM_THREADS; i++)
+			{
+				rv = pthread_tryjoin_np(pls_thread[i].pthread_desc, NULL);
+				if (rv)
+				{
+					//printf("thread #%d not finished\n", i);
+					break;
+				}
+				else
+				{
+					pls_thread[i].finished = true;
+					printf("thread #%d finished\n", i);
+				}
+			}
+			for (i = 0; i < NUM_THREADS; i++)
+			{
+				if (!pls_thread[i].finished)
+					break;
+
+				printf("all writing threads are finished now\n");
+				exit(0);
+			}
+		}
 		usleep(10);
 	}
-
 #if 0
-	for (i = 0; i < NUM_THREADS; i++)
+	if (global.mode == MODE_WRITE)
 	{
-		pthread_join(pls_thread[i].pthread_desc, NULL);
+		for (i = 0; i < NUM_THREADS; i++)
+		{
+			pthread_join(pls_thread[i].pthread_desc, NULL);
+		}
+		printf("all writing threads are finished now\n");
+		exit(0);
 	}
-
-	printf("all writing threads are finished now\n");
-#endif		
+#endif
 
 	while(1)
 	{
 		usleep(10);
 	}
-
-
-
 
 	return rv;
 }
