@@ -20,7 +20,7 @@
 #include "spdk/string.h"
 #include "spdk/queue.h"
 
-#define VERSION "0.97"
+#define VERSION "0.971"
 #define MB 1048576
 #define K4 4096
 #define SHM_PKT_POOL_BUF_SIZE  1856
@@ -1073,6 +1073,7 @@ int main(int argc, char *argv[])
 	int i;
 	size_t count;
 	char mode = 'w';
+	bool all_finished;
 
 	printf("version: %s\n", VERSION);
 
@@ -1185,7 +1186,7 @@ int main(int argc, char *argv[])
 				if (rv)
 				{
 					//printf("thread #%d not finished\n", i);
-					break;
+					continue;
 				}
 				else
 				{
@@ -1193,11 +1194,19 @@ int main(int argc, char *argv[])
 					printf("thread #%d finished\n", i);
 				}
 			}
+			all_finished = true;
 			for (i = 0; i < NUM_THREADS; i++)
 			{
 				if (!pls_thread[i].finished)
+				{
+					all_finished = false;
 					break;
-
+				}
+				else
+					continue;
+			}
+			if (all_finished)
+			{
 				printf("all writing threads are finished now\n");
 				exit(0);
 			}
