@@ -674,7 +674,7 @@ void* init_read_thread(void *arg)
 				     void *thread_ctx); */
 	
 	t->thread = spdk_allocate_thread(pls_send_msg, pls_start_poller,
-                                 pls_stop_poller, (void*)t, "pls_worker_thread");
+                                 pls_stop_poller, (void*)t, "pls_reader_thread");
 
         if (!t->thread) 
 	{
@@ -730,7 +730,7 @@ void* init_read_thread(void *arg)
 			{
 				printf("read wait. read_offset: 0x%lx , write_offset: 0x%lx \n",
 					offset, t0->a_offset);
-				usleep(10000);		
+				usleep(100000);		
 			}
 
 			printf("read now. read_offset: 0x%lx , write_offset: 0x%lx \n",
@@ -814,7 +814,7 @@ void* init_thread(void *arg)
 				     void *thread_ctx); */
 	
 	t->thread = spdk_allocate_thread(pls_send_msg, pls_start_poller,
-                                 pls_stop_poller, (void*)t, "pls_worker_thread");
+                                 pls_stop_poller, (void*)t, "pls_writer_thread");
 
         if (!t->thread) 
 	{
