@@ -15,3 +15,9 @@ hugefree.sh
 use 4.9.X gcc
 -----
 PATH=/opt/rh/devtoolset-3/root/usr/bin:$PATH
+
+coredump
+-----
+ulimit -c unlimited
+sysctl -w kernel.core_pattern=core_%p_%t
+

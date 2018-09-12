@@ -14,6 +14,7 @@
 *.sw?
 Session.vim
 repu1sion/bdev_odp/bdev_odp
+*.pcap
 *.DS_Store
 ut_coverage/
 tags
