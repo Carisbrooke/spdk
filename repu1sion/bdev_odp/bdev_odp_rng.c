@@ -57,12 +57,14 @@ typedef struct global_s
 {
 	mode_e mode;
 	char *pci_nvme_addr;
+	atomic_ulong offset;		//global atomic offset for whole device
 } global_t;
 
 static global_t global = 
 {
 	.mode = MODE_WRITE,
 	.pci_nvme_addr = "0000:02:00.0",
+	.offset = 0,
 };
 
 /* Used to pass messages between fio threads */
@@ -87,7 +89,6 @@ typedef struct pls_thread_s
 	bool read_complete;		//flag, false when read callback not finished, else - tru
         unsigned char *buf;
 	uint64_t offset;		//just for stats
-	atomic_ulong a_offset;		//atomic offset for id 0 thread
 	pthread_t pthread_desc;
         struct spdk_thread *thread; /* spdk thread context */
         struct spdk_ring *ring; /* ring for passing messages to this thread */
@@ -652,7 +653,6 @@ void* init_read_thread(void *arg)
 	int rv = 0;
 	uint64_t nbytes = BUFFER_SIZE;
 	pls_thread_t *t = &pls_read_thread;
-	pls_thread_t *t0 = &pls_thread[0];	//ptr to writer0 thread
 	uint64_t offset;
 	uint64_t thread_limit;
 	static uint64_t readbytes = 0;
@@ -726,15 +726,15 @@ void* init_read_thread(void *arg)
 		//wait here till write thread with id 0 do some writing
 		if (global.mode == MODE_RW)
 		{
-			while (offset + BUFFER_SIZE > t0->a_offset)
+			while (offset + BUFFER_SIZE > global.offset) //XXX - check and rework
 			{
 				printf("read wait. read_offset: 0x%lx , write_offset: 0x%lx \n",
-					offset, t0->a_offset);
+					offset, global.offset);
 				usleep(100000);		
 			}
 
 			printf("read now. read_offset: 0x%lx , write_offset: 0x%lx \n",
-				offset, t0->a_offset);
+				offset, global.offset);
 		}
 
 		rv = spdk_bdev_read(t->pls_target.desc, t->pls_target.ch,
@@ -796,11 +796,7 @@ void* init_thread(void *arg)
 	odp_packet_t pkt;
 	odp_time_t time;
 
-	//init offset
-	offset = t->idx * THREAD_OFFSET; //each thread has a 4 Gb of space
-	t->a_offset = offset;
-	thread_limit = offset + THREAD_LIMIT;
-	printf("%s() called from thread #%d. offset: 0x%lx\n", __func__, t->idx, offset);
+	//printf("%s() called from thread #%d. offset: 0x%lx\n", __func__, t->idx, offset);
 
 	t->ring = spdk_ring_create(SPDK_RING_TYPE_MP_SC, 4096, SPDK_ENV_SOCKET_ID_ANY);
 	if (!t->ring) 
@@ -948,6 +944,7 @@ void* init_thread(void *arg)
 			}
 			else
 			{
+# if 0
 				//quit if we reached thread_limit
 				if (offset + nbytes >= thread_limit)
 				{
@@ -958,28 +955,25 @@ void* init_thread(void *arg)
 						spdk_dma_free(t->buf);
 						t->buf = NULL;
 					}
-#if 0
-					//in case of thread id 0 we do reading, other threads just quit
-					if (global.mode == MODE_READ /*|| global.mode == MODE_RW*/)
-						if (t->idx == 0)
-							goto read;
-#endif
+
 					return NULL;
 				}
-#ifdef HL_DEBUGS
-				printf("writing %lu bytes from thread# #%d, offset: 0x%lx\n",
-					nbytes, t->idx, offset);
 #endif
-				t->offset = offset;
-				t->a_offset = offset;
+
+				//get global atomic offset value, increase it before writing.
+				//t->offset just used for stats in read/write callbacks
+				t->offset = offset = global.offset;
+				global.offset += nbytes;
 				rv = spdk_bdev_write(t->pls_target.desc, t->pls_target.ch, 
-					t->buf, offset, /*position*/ nbytes, pls_bdev_write_done_cb, t);
+					t->buf, offset, nbytes, pls_bdev_write_done_cb, t);
 				if (rv)
 					printf("#%d spdk_bdev_write failed, offset: 0x%lx, size: %lu\n",
 						t->idx, offset, nbytes);
-
-				offset += nbytes;
-				//offset += position;
+#ifdef HL_DEBUGS
+				else
+					printf("writing %lu bytes from thread# #%d, offset: 0x%lx\n",
+						nbytes, t->idx, offset);
+#endif
 
 				//need to wait for bdev write completion first
 				while(t->buf)
@@ -1004,64 +998,6 @@ void* init_thread(void *arg)
 		}
 		odp_packet_free(pkt);
 	}
-
-#if 0
-read:
-	//wait before reading data back
-	sleep(1);
-
-	//reading data back to check is it correctly wrote
-	printf("now trying to read data back\n");
-	offset = t->idx * 0x10000000;
-
-	while(1)
-	{
-		bf = spdk_dma_zmalloc(nbytes, 0, NULL);
-		if (!bf)
-		{
-			printf("failed to allocate RAM for reading\n");
-			return NULL;
-		}
-		t->read_complete = false;
-		rv = spdk_bdev_read(t->pls_target.desc, t->pls_target.ch,
-			bf, offset, nbytes, pls_bdev_read_done_cb, t);
-		//printf("after spdk read\n");
-		if (rv)
-			printf("spdk_bdev_read failed\n");
-		else
-		{
-			offset += nbytes;
-			readbytes += nbytes;
-			//printf("spdk_bdev_read NO errors\n");
-		}
-		//need to wait for bdev read completion first
-		while(t->read_complete == false)
-		{
-			usleep(10);
-		}
-
-		//parsing packets here and creating pcap
-		//in bf pointer we have buf with data read
-		//writing to .pcap file is also here
-		int r = pls_pcap_create(bf);
-		if (r)
-		{
-			printf("error creating pcap\n");
-		}
-
-		//print dump
-		//hexdump(bf, 2048);
-
-		spdk_dma_free(bf);
-
-		//exit in case we read enough
-		if (readbytes >= READ_LIMIT)
-		{
-			printf("read is over\n");
-			break;
-		}
-	}
-#endif
 
 	return NULL;
 }
