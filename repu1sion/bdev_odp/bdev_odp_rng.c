@@ -20,7 +20,7 @@
 #include "spdk/string.h"
 #include "spdk/queue.h"
 
-#define VERSION "0.971"
+#define VERSION "0.98"
 #define MB 1048576
 #define K4 4096
 #define SHM_PKT_POOL_BUF_SIZE  1856
@@ -35,9 +35,6 @@
 #define FILE_NAME "dump.pcap"
 #define BUFFER_SIZE 1048576
 //#define BUFFER_SIZE 1024
-#define THREAD_OFFSET 0x100000000	//4Gb of offset for every thread 
-#define THREAD_LIMIT 0x100000000	//space for every thread to write
-//#define THREAD_LIMIT 0x900		//space for every thread to write
 #define READ_LIMIT 0x100000000		//space for every thread to read
 
 //OPTIONS
@@ -57,6 +54,10 @@ typedef struct global_s
 {
 	mode_e mode;
 	char *pci_nvme_addr;
+	uint32_t block_size;
+	uint64_t num_blocks;
+	uint64_t max_offset; 
+	atomic_ulong overwrap_cnt;
 	atomic_ulong offset;		//global atomic offset for whole device
 } global_t;
 
@@ -64,6 +65,10 @@ static global_t global =
 {
 	.mode = MODE_WRITE,
 	.pci_nvme_addr = "0000:02:00.0",
+	.block_size = 0,
+	.num_blocks = 0,
+	.max_offset = 0,
+	.overwrap_cnt = 0,
 	.offset = 0,
 };
 
@@ -785,7 +790,6 @@ void* init_thread(void *arg)
 	uint64_t nbytes = BUFFER_SIZE;
 	pls_thread_t *t = (pls_thread_t*)arg;
 	uint64_t offset;
-	uint64_t thread_limit;
 	uint64_t position = 0;
 	//static uint64_t readbytes = 0;
 	int pkt_len;
@@ -836,6 +840,16 @@ void* init_thread(void *arg)
 	{
 		printf("failed to open device\n");
 		return NULL;
+	}
+
+	if (t->idx == 0)
+	{
+		global.block_size = spdk_bdev_get_block_size(t->pls_target.bd);
+		global.num_blocks = spdk_bdev_get_num_blocks(t->pls_target.bd);
+		printf("device block size is: %u bytes, num blocks: %lu\n", 
+			global.block_size, global.num_blocks);
+		global.max_offset = global.block_size * global.num_blocks - 1;
+		printf("max offset(bytes): 0x%lx\n", global.max_offset);
 	}
 
 	printf("open io channel\n");
@@ -944,26 +958,21 @@ void* init_thread(void *arg)
 			}
 			else
 			{
-# if 0
-				//quit if we reached thread_limit
-				if (offset + nbytes >= thread_limit)
-				{
-					printf("#%d. thread limit reached: 0x%lx\n", t->idx, thread_limit);
-					odp_packet_free(pkt);
-					if (t->buf)
-					{
-						spdk_dma_free(t->buf);
-						t->buf = NULL;
-					}
-
-					return NULL;
-				}
-#endif
-
 				//get global atomic offset value, increase it before writing.
 				//t->offset just used for stats in read/write callbacks
 				t->offset = offset = global.offset;
 				global.offset += nbytes;
+
+				//overwrap
+				if (global.offset > global.max_offset)
+				{
+					global.offset = 0;
+					t->offset = offset = global.offset;
+					global.offset += nbytes;
+					global.overwrap_cnt++;
+					printf("overwrap is done. now overwraps: %lu \n", global.overwrap_cnt);
+				}
+
 				rv = spdk_bdev_write(t->pls_target.desc, t->pls_target.ch, 
 					t->buf, offset, nbytes, pls_bdev_write_done_cb, t);
 				if (rv)
