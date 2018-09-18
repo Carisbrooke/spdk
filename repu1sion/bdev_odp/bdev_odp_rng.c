@@ -659,13 +659,10 @@ void* init_read_thread(void *arg)
 	uint64_t nbytes = BUFFER_SIZE;
 	pls_thread_t *t = &pls_read_thread;
 	uint64_t offset;
-	uint64_t thread_limit;
 	static uint64_t readbytes = 0;
 	void *bf;
 
-	//init offset
 	offset = 0;
-	thread_limit = offset + READ_LIMIT;
 
 	t->ring = spdk_ring_create(SPDK_RING_TYPE_MP_SC, 4096, SPDK_ENV_SOCKET_ID_ANY);
 	if (!t->ring) 
@@ -728,14 +725,17 @@ void* init_read_thread(void *arg)
 		}
 		t->read_complete = false;
 
-		//wait here till write thread with id 0 do some writing
+		//wait here till threads do some writing
 		if (global.mode == MODE_RW)
 		{
-			while (offset + BUFFER_SIZE > global.offset) //XXX - check and rework
+			if (global.overwrap_cnt == 0)
 			{
-				printf("read wait. read_offset: 0x%lx , write_offset: 0x%lx \n",
-					offset, global.offset);
-				usleep(100000);		
+				while (offset + BUFFER_SIZE >= global.offset)
+				{
+					printf("read wait. read_offset: 0x%lx , write_offset: 0x%lx \n",
+						offset, global.offset);
+					usleep(100000);		
+				}
 			}
 
 			printf("read now. read_offset: 0x%lx , write_offset: 0x%lx \n",
@@ -772,13 +772,6 @@ void* init_read_thread(void *arg)
 		//hexdump(bf, 2048);
 
 		spdk_dma_free(bf);
-
-		//exit in case we read enough
-		if (readbytes >= thread_limit)
-		{
-			printf("read is over\n");
-			break;
-		}
 	}
 
 	return NULL;
@@ -791,7 +784,6 @@ void* init_thread(void *arg)
 	pls_thread_t *t = (pls_thread_t*)arg;
 	uint64_t offset;
 	uint64_t position = 0;
-	//static uint64_t readbytes = 0;
 	int pkt_len;
 	unsigned short len;
 	//void *bf;
@@ -842,6 +834,7 @@ void* init_thread(void *arg)
 		return NULL;
 	}
 
+	//get device size
 	if (t->idx == 0)
 	{
 		global.block_size = spdk_bdev_get_block_size(t->pls_target.bd);
