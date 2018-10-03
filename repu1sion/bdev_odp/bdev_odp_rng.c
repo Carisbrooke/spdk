@@ -59,6 +59,7 @@ typedef struct global_s
 	uint64_t max_offset; 
 	atomic_ulong overwrap_cnt;
 	atomic_ulong offset;		//global atomic offset for whole device
+	atomic_ulong wrote_offset;	//global atomic offset already guaranteed wrote
 } global_t;
 
 static global_t global = 
@@ -70,6 +71,7 @@ static global_t global =
 	.max_offset = 0,
 	.overwrap_cnt = 0,
 	.offset = 0,
+	.wrote_offset = 0,
 };
 
 /* Used to pass messages between fio threads */
@@ -356,17 +358,8 @@ static void pls_bdev_write_done_cb(struct spdk_bdev_io *bdev_io, bool success, v
 		debug("write completed successfully\n");
 		//cnt++;
 		__atomic_fetch_add(&cnt, 1, __ATOMIC_SEQ_CST);
-
-#if 0
-		bytes_wrote += BUFFER_SIZE;
-		now = time(0);
-	        if (now > old)
-                {
-
-
-		}
-#endif
-
+		if (global.wrote_offset < t->offset)
+			global.wrote_offset = t->offset;
 	}
 	else
 		printf("write failed\n");
@@ -713,6 +706,7 @@ void* init_read_thread(void *arg)
 		rv = -1; return NULL;
 	}
 
+	sleep(3);	//need to wait till we write some data
 	printf("read thread started\n");
 
 	while(1)
@@ -730,16 +724,16 @@ void* init_read_thread(void *arg)
 		{
 			if (global.overwrap_cnt == 0)
 			{
-				while (offset + BUFFER_SIZE >= global.offset)
+				while (offset + BUFFER_SIZE >= global.wrote_offset)
 				{
-					printf("read wait. read_offset: 0x%lx , write_offset: 0x%lx \n",
-						offset, global.offset);
+					printf("read wait. read_offset: 0x%lx , wr0te_offset: 0x%lx \n",
+						offset, global.wrote_offset);
 					usleep(100000);		
 				}
 			}
 
-			printf("read now. read_offset: 0x%lx , write_offset: 0x%lx \n",
-				offset, global.offset);
+			printf("read now. read_offset: 0x%lx , wr0te_offset: 0x%lx \n",
+				offset, global.wrote_offset);
 		}
 
 		rv = spdk_bdev_read(t->pls_target.desc, t->pls_target.ch,
@@ -952,7 +946,7 @@ void* init_thread(void *arg)
 			else
 			{
 				//get global atomic offset value, increase it before writing.
-				//t->offset just used for stats in read/write callbacks
+				//t->offset used  in read/write callbacks
 				t->offset = offset = global.offset;
 				global.offset += nbytes;
 
