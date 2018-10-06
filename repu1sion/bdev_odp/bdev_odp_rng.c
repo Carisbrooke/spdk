@@ -28,6 +28,7 @@
 #define NVME_MAX_BDEVS_PER_RPC 32
 #define MAX_PACKET_SIZE 1600
 #define DEVICE_NAME "s4msung"
+#define DEVICE_NAME_NQN "s4msungnqn"
 #define NUM_THREADS 4
 #define NUM_INPUT_Q 4
 
@@ -596,7 +597,9 @@ int init_spdk(void)
 	
 	printf("creating bdev device...\n");
 	//in names returns names of created devices, in count returns number of devices
-	rv = spdk_bdev_nvme_create(&trid, DEVICE_NAME, names, &count);
+	//5th param hostnqn - host NVMe Qualified Name. used only for nvmeof.
+	//unused for local pcie connected devices
+	rv = spdk_bdev_nvme_create(&trid, DEVICE_NAME, names, &count, DEVICE_NAME_NQN);
 	if (rv)
 	{
 		printf("error: can't create bdev device!\n");
