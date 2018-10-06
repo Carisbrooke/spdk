@@ -7,8 +7,8 @@ APP = bdev_odp_rng
 
 C_SRCS := bdev_odp_rng.c
 
-SPDK_LIB_LIST = event_bdev event_copy event_iscsi event_net event_scsi event_nvmf
-SPDK_LIB_LIST += nvmf event log trace conf util bdev iscsi scsi copy rpc jsonrpc json
+SPDK_LIB_LIST = event_bdev event_copy
+SPDK_LIB_LIST += nvmf event log trace conf util bdev iscsi scsi copy rpc jsonrpc json thread log sock
 SPDK_LIB_LIST += app_rpc log_rpc bdev_rpc
 
 LIBS += $(BLOCKDEV_MODULES_LINKER_ARGS) \
