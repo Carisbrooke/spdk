@@ -9,7 +9,7 @@ C_SRCS := bdev_odp_rng.c
 
 SPDK_LIB_LIST = event_bdev event_copy
 SPDK_LIB_LIST += nvmf event log trace conf util bdev iscsi scsi copy rpc jsonrpc json thread log sock
-SPDK_LIB_LIST += app_rpc log_rpc bdev_rpc
+SPDK_LIB_LIST += app_rpc log_rpc bdev_rpc vbdev_raid
 
 LIBS += $(BLOCKDEV_MODULES_LINKER_ARGS) \
 	$(COPY_MODULES_LINKER_ARGS) \
