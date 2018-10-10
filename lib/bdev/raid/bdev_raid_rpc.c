@@ -292,6 +292,96 @@ spdk_rpc_construct_raid_bdev(struct spdk_jsonrpc_request *request,
 }
 SPDK_RPC_REGISTER("construct_raid_bdev", spdk_rpc_construct_raid_bdev, SPDK_RPC_RUNTIME)
 
+//repu1sion
+//strip_size - raid size in blocks
+int spdk_construct_raid_bdev(char *raidname, uint32_t raidsize, uint8_t raidlevel, size_t numdevices, char *dev1, char *dev2)
+{
+	struct rpc_construct_raid_bdev req = {};
+	//struct spdk_json_write_ctx     *w;
+	struct raid_bdev_config        *raid_cfg;
+	int			       rc;
+
+	//fill req
+	req.name = raidname;
+	req.strip_size = raidsize;
+	req.raid_level = raidlevel;
+	req.base_bdevs.num_base_bdevs = numdevices;
+	req.base_bdevs.base_bdevs[0] = dev1;
+	req.base_bdevs.base_bdevs[1] = dev2;
+
+/*
+	if (spdk_json_decode_object(params, rpc_construct_raid_bdev_decoders,
+				    SPDK_COUNTOF(rpc_construct_raid_bdev_decoders),
+				    &req)) {
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+						 "Invalid parameters");
+		free_rpc_construct_raid_bdev(&req);
+		return;
+	}
+*/
+
+	//fill raid_cfg
+	rc = raid_bdev_config_add(req.name, req.strip_size, req.base_bdevs.num_base_bdevs, req.raid_level, &raid_cfg);
+	if (rc != 0)
+	{
+		/*spdk_jsonrpc_send_error_response_fmt(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+						     "Failed to add RAID bdev config %s: %s",
+						     req.name, spdk_strerror(-rc));*/
+		//free_rpc_construct_raid_bdev(&req);
+		return -1;
+	}
+
+	for (size_t i = 0; i < req.base_bdevs.num_base_bdevs; i++) 
+	{
+		rc = raid_bdev_config_add_base_bdev(raid_cfg, req.base_bdevs.base_bdevs[i], i);
+		if (rc != 0) 
+		{
+			raid_bdev_config_cleanup(raid_cfg);
+			/*spdk_jsonrpc_send_error_response_fmt(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+							     "Failed to add base bdev %s to RAID bdev config %s: %s",
+							     req.base_bdevs.base_bdevs[i], req.name,
+							     spdk_strerror(-rc));*/
+			free_rpc_construct_raid_bdev(&req);
+			return -1;
+		}
+	}
+
+	rc = raid_bdev_create(raid_cfg);
+	if (rc != 0) 
+	{
+		raid_bdev_config_cleanup(raid_cfg);
+		/*spdk_jsonrpc_send_error_response_fmt(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+						     "Failed to create RAID bdev %s: %s", req.name, spdk_strerror(-rc));*/
+		free_rpc_construct_raid_bdev(&req);
+		return -1;
+	}
+
+	rc = raid_bdev_add_base_devices(raid_cfg);
+	if (rc != 0) 
+	{
+		/*spdk_jsonrpc_send_error_response_fmt(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+						     "Failed to add any base bdev to RAID bdev %s: %s",
+						     req.name, spdk_strerror(-rc));*/
+		free_rpc_construct_raid_bdev(&req);
+		return -1;
+	}
+
+	free_rpc_construct_raid_bdev(&req);
+
+/*
+	w = spdk_jsonrpc_begin_result(request);
+	if (w == NULL) {
+		return;
+	}
+
+	spdk_json_write_bool(w, true);
+	spdk_jsonrpc_end_result(request, w);
+*/
+
+	return 0;
+}
+
+
 /*
  * Input structure for RPC destroy_raid
  */
