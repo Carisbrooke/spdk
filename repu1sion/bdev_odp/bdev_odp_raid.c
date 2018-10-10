@@ -12,6 +12,7 @@
 
 #include "spdk/stdinc.h"
 #include "spdk/bdev.h"
+#include "spdk/bdev_raid.h"
 #include "spdk/copy_engine.h"
 #include "spdk/conf.h"
 #include "spdk/env.h"
@@ -28,6 +29,7 @@
 #define NVME_MAX_BDEVS_PER_RPC 32
 #define MAX_PACKET_SIZE 1600
 #define DEVICE_NAME "s4msung"
+#define DEVICE_NAME2 "s4msung2"
 #define DEVICE_NAME_NQN "s4msungnqn"
 #define NUM_THREADS 4
 #define NUM_INPUT_Q 4
@@ -599,6 +601,7 @@ int init_spdk(void)
 	//in names returns names of created devices, in count returns number of devices
 	//5th param hostnqn - host NVMe Qualified Name. used only for nvmeof.
 	//unused for local pcie connected devices
+	//There can be more than one bdev per NVMe controller since one bdev is created per namespace
 	rv = spdk_bdev_nvme_create(&trid, DEVICE_NAME, names, &count, DEVICE_NAME_NQN);
 	if (rv)
 	{
@@ -612,6 +615,20 @@ int init_spdk(void)
 
 	return rv;
 }
+
+int create_raid(char *devname1, char *devname2, size_t numblocks)
+{
+	int rv = 0;
+	//raid name, numblocks, raid lvl, num devices, name1, name2
+	rv = spdk_construct_raid_bdev("pulseraid", numblocks, 0, 2, devname1, devname2);
+	if (!rv)
+		printf("raid created successfully\n");
+	else
+		printf("failed to create raid\n");
+
+	return rv;
+}
+
 
 int init_odp(void)
 {
@@ -1051,6 +1068,13 @@ int main(int argc, char *argv[])
 	if (rv)
 	{
 		printf("init failed. exiting\n");
+		exit(1);
+	}
+
+	rv = create_raid(DEVICE_NAME, DEVICE_NAME2, global.num_blocks)//XXX - num_blocks is 0 here..
+	if (rv)
+	{
+		printf("creating raid failed. exiting\n");
 		exit(1);
 	}
 
