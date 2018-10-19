@@ -4,6 +4,10 @@ ODP_HW_TIMESTAMPS=1 SPDK_NOINIT=1 ./bdev_odp
 ODP_HW_TIMESTAMPS=1 SPDK_NOINIT=1 ./bdev_odp [rwb]	- read, write, both (write by default)
 ODP_HW_TIMESTAMPS=1 SPDK_NOINIT=1 ./bdev_odp b
 
+run raid app
+-----
+SPDK_NOINIT=1 ./bdev_odp_raid
+
 dump
 -----
 tcpdump --time-stamp-precision=nano -r dump.pcap
@@ -20,4 +24,22 @@ coredump
 -----
 ulimit -c unlimited
 sysctl -w kernel.core_pattern=core_%p_%t
+
+setup spdk
+-----
+[root@paul spdkp]# sudo ./scripts/setup.sh
+0000:04:00.0 (144d a804): nvme -> uio_pci_generic
+0000:05:00.0 (144d a804): nvme -> uio_pci_generic
+Active mountpoints on /dev/nvme2n1, so not binding PCI dev 0000:06:00.0
+
+
+sequence to run raid app:
+-----------
+0. install and build ofed, dpdk, odp, spdk.
+
+PATH=/opt/rh/devtoolset-3/root/usr/bin:$PATH
+./scripts/setup.sh
+SPDK_NOINIT=1 ./bdev_odp_raid
+
+
 

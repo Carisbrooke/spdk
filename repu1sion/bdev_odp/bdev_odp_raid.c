@@ -12,7 +12,7 @@
 
 #include "spdk/stdinc.h"
 #include "spdk/bdev.h"
-#include "spdk/bdev_raid.h"
+#include "../lib/bdev/raid/bdev_raid.h"
 #include "spdk/copy_engine.h"
 #include "spdk/conf.h"
 #include "spdk/env.h"
@@ -29,7 +29,6 @@
 #define NVME_MAX_BDEVS_PER_RPC 32
 #define MAX_PACKET_SIZE 1600
 #define DEVICE_NAME "s4msung"
-#define DEVICE_NAME2 "s4msung2"
 #define DEVICE_NAME_NQN "s4msungnqn"
 #define NUM_THREADS 4
 #define NUM_INPUT_Q 4
@@ -39,6 +38,11 @@
 #define BUFFER_SIZE 1048576
 //#define BUFFER_SIZE 1024
 #define READ_LIMIT 0x100000000		//space for every thread to read
+
+//raid
+#define NUM_RAID_DEVICES 2
+#define RAID1 "0000:04:00.0"
+#define RAID2 "0000:05:00.0"
 
 //OPTIONS
 //#define DUMP_PACKET
@@ -56,7 +60,8 @@ typedef enum {MODE_READ, MODE_WRITE, MODE_RW} mode_e;
 typedef struct global_s
 {
 	mode_e mode;
-	char *pci_nvme_addr;
+	char *pci_nvme_addr[NUM_RAID_DEVICES];
+	char devname[NUM_RAID_DEVICES][30];
 	uint32_t block_size;
 	uint64_t num_blocks;
 	uint64_t max_offset; 
@@ -65,10 +70,13 @@ typedef struct global_s
 	atomic_ulong wrote_offset;	//global atomic offset already guaranteed wrote
 } global_t;
 
+global_t global;
+
+/*
 static global_t global = 
 {
 	.mode = MODE_WRITE,
-	.pci_nvme_addr = "0000:02:00.0",
+	.pci_nvme_addr[NUM_RAID_DEVICES] = {{0}},
 	.block_size = 0,
 	.num_blocks = 0,
 	.max_offset = 0,
@@ -76,6 +84,7 @@ static global_t global =
 	.offset = 0,
 	.wrote_offset = 0,
 };
+*/
 
 /* Used to pass messages between fio threads */
 struct pls_msg {
@@ -141,6 +150,7 @@ void* init_thread(void*);
 void* init_read_thread(void *arg);
 int init_spdk(void);
 int init_odp(void);
+int create_raid(char*, char*, size_t);
 
 void hexdump(void *addr, unsigned int size)
 {
@@ -499,9 +509,9 @@ int init_spdk(void)
 	size_t cnt;
 
 	//this identifies an unique endpoint on an NVMe fabric
-	struct spdk_nvme_transport_id trid = {};
+	struct spdk_nvme_transport_id trid[NUM_RAID_DEVICES] = {{0}};
 	size_t count = NVME_MAX_BDEVS_PER_RPC;
-	int i;
+	int i, j;
 
 	printf("%s() called \n", __func__);
 
@@ -533,7 +543,7 @@ int init_spdk(void)
 
 	/* Initialize the environment library */
 	spdk_env_opts_init(&opts);
-	opts.name = "bdev_pls";
+	opts.name = "bdev_raid";
 
 	if (spdk_env_init(&opts) < 0) {
 		SPDK_ERRLOG("Unable to initialize SPDK env\n");
@@ -592,25 +602,29 @@ int init_spdk(void)
 		      const char *base_name,
 		      const char **names, size_t *count)
 	*/
-	//fill up trid.
-	trid.trtype = SPDK_NVME_TRANSPORT_PCIE;
-	trid.adrfam = 0;
-	memcpy(trid.traddr, global.pci_nvme_addr, strlen(global.pci_nvme_addr));
-	
-	printf("creating bdev device...\n");
-	//in names returns names of created devices, in count returns number of devices
-	//5th param hostnqn - host NVMe Qualified Name. used only for nvmeof.
-	//unused for local pcie connected devices
-	//There can be more than one bdev per NVMe controller since one bdev is created per namespace
-	rv = spdk_bdev_nvme_create(&trid, DEVICE_NAME, names, &count, DEVICE_NAME_NQN);
-	if (rv)
+
+	//create needed bdev devices for raid
+	for (i = 0; i < NUM_RAID_DEVICES; i++) 
 	{
-		printf("error: can't create bdev device!\n");
-		return -1;
-	}
-	for (i = 0; i < (int)count; i++) 
-	{
-		printf("#%d: device %s created \n", i, names[i]);
+		trid[i].trtype = SPDK_NVME_TRANSPORT_PCIE;
+		trid[i].adrfam = 0;
+		memcpy(trid[i].traddr, global.pci_nvme_addr[i], strlen(global.pci_nvme_addr[i]));
+		
+		printf("creating bdev device #%d\n", i);
+		//in names returns names of created devices, in count returns number of devices
+		//5th param hostnqn - host NVMe Qualified Name. used only for nvmeof.
+		//unused for local pcie connected devices
+		//There can be more than one bdev per NVMe controller since one bdev is created per namespace
+		rv = spdk_bdev_nvme_create(&trid[i], global.devname[i], names, &count, DEVICE_NAME_NQN);
+		if (rv)
+		{
+			printf("error: can't create bdev device!\n");
+			return -1;
+		}
+		for (j = 0; j < (int)count; j++) 
+		{
+			printf("#%d: device %s created \n", j, names[j]);
+		}
 	}
 
 	return rv;
@@ -653,7 +667,11 @@ int init_odp(void)
 	pktio_param.in_mode = ODP_PKTIN_MODE_QUEUE;
 	printf("setting queue mode\n");
 	pktio = odp_pktio_open(devname, pool, &pktio_param);
-	if (pktio == ODP_PKTIO_INVALID) exit(1);
+	if (pktio == ODP_PKTIO_INVALID) 
+	{
+		printf("<failed to init pktio. exiting>\n");
+		exit(1);
+	}
 
 	odp_pktin_queue_param_init(&pktin_param);
 	pktin_param.op_mode     = ODP_PKTIO_OP_MT;
@@ -1035,6 +1053,8 @@ int main(int argc, char *argv[])
 		printf("param: %c \n", mode);
 	}
 	
+	//global init
+	memset(&global, 0x0, sizeof(global));
 	switch (mode)
 	{
 		case 'w':
@@ -1051,6 +1071,17 @@ int main(int argc, char *argv[])
 			break;
 	}
 	printf("global.mode: %d \n", global.mode);
+	//XXX
+	global.pci_nvme_addr[0] = strdup(RAID1);
+	global.pci_nvme_addr[1] = strdup(RAID2);
+
+	for (i = 0; i < NUM_RAID_DEVICES; i++)
+	{
+		char c[2] = {0};
+		strcpy(global.devname[i], DEVICE_NAME);
+		sprintf(c, "%d", i+1);
+		strcat(global.devname[i], c);
+	}
 
 	//enable logging
 	spdk_log_set_print_level(SPDK_LOG_DEBUG);
@@ -1071,7 +1102,7 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
-	rv = create_raid(DEVICE_NAME, DEVICE_NAME2, global.num_blocks)//XXX - num_blocks is 0 here..
+	rv = create_raid(global.devname[0], global.devname[1], global.num_blocks);	//XXX - num_blocks is 0 here..
 	if (rv)
 	{
 		printf("creating raid failed. exiting\n");

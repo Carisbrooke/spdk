@@ -3,9 +3,9 @@ include $(SPDK_ROOT_DIR)/mk/spdk.common.mk
 include $(SPDK_ROOT_DIR)/mk/spdk.modules.mk
 include $(SPDK_ROOT_DIR)/mk/spdk.app.mk
 
-APP = bdev_odp_rng
+APP = bdev_odp_raid
 
-C_SRCS := bdev_odp_rng.c
+C_SRCS := bdev_odp_raid.c
 
 SPDK_LIB_LIST = event_bdev event_copy
 SPDK_LIB_LIST += nvmf event log trace conf util bdev iscsi scsi copy rpc jsonrpc json thread log sock
