@@ -40,6 +40,7 @@
 #define READ_LIMIT 0x100000000		//space for every thread to read
 
 //raid
+#define RAID_DEVICE "pulseraid"
 #define NUM_RAID_DEVICES 2
 #define RAID1 "0000:04:00.0"
 #define RAID2 "0000:05:00.0"
@@ -64,7 +65,9 @@ typedef struct global_s
 	char devname[NUM_RAID_DEVICES][30];
 	uint32_t block_size;
 	uint64_t num_blocks;
-	uint64_t max_offset; 
+	uint64_t max_offset;
+	uint64_t bytes;
+ 	uint64_t kb;
 	atomic_ulong overwrap_cnt;
 	atomic_ulong offset;		//global atomic offset for whole device
 	atomic_ulong wrote_offset;	//global atomic offset already guaranteed wrote
@@ -627,6 +630,36 @@ int init_spdk(void)
 		}
 	}
 
+	//get num blocks
+	struct spdk_bdev *bd;
+	struct spdk_bdev_desc *desc;
+	bd = spdk_bdev_get_by_name(names[0]);
+	if (!bd)
+	{
+		printf("<failed to get device> \n");
+		rv = 1; return rv;
+	}
+	else
+		printf("got device with name %s\n", names[0]);
+
+	rv = spdk_bdev_open(bd, 1, NULL, NULL, &desc);
+	if (rv)
+	{
+		printf("failed to open device\n");
+		return rv;
+	}
+
+	global.block_size = spdk_bdev_get_block_size(bd);
+	global.num_blocks = spdk_bdev_get_num_blocks(bd);
+	global.bytes = global.block_size * global.num_blocks;
+	global.kb = global.bytes / 1024;
+	printf("device block size is: %u bytes, num blocks: %lu, bytes: %lu, kb: %lu\n",
+		global.block_size, global.num_blocks, global.bytes, global.kb);
+	global.max_offset = global.block_size * global.num_blocks - 1;
+	printf("max offset(bytes): 0x%lx\n", global.max_offset);
+
+	spdk_bdev_close(desc);//let's don't keep first device open
+
 	return rv;
 }
 
@@ -634,15 +667,14 @@ int create_raid(char *devname1, char *devname2, size_t numblocks)
 {
 	int rv = 0;
 	//raid name, numblocks, raid lvl, num devices, name1, name2
-	rv = spdk_construct_raid_bdev("pulseraid", numblocks, 0, 2, devname1, devname2);
+	rv = spdk_construct_raid_bdev(RAID_DEVICE, numblocks, 0, 2, devname1, devname2);
 	if (!rv)
-		printf("raid created successfully\n");
+		printf("[raid created successfully]\n");
 	else
-		printf("failed to create raid\n");
+		printf("<failed to create raid>\n");
 
 	return rv;
 }
-
 
 int init_odp(void)
 {
@@ -849,14 +881,22 @@ void* init_thread(void *arg)
 
 	TAILQ_INIT(&t->pollers);
 
-	t->pls_target.bd = spdk_bdev_get_by_name(names[0]); //XXX - we always try to open device with idx 0
+	struct raid_bdev_config *raid_cfg = NULL;
+	raid_cfg = raid_bdev_config_find_by_name(RAID_DEVICE);
+	if (!raid_cfg)
+	{
+		printf("<failed to get raid config>\n");
+		rv = 1; return NULL;
+	}
+
+	t->pls_target.bd = &raid_cfg->raid_bdev->bdev;
 	if (!t->pls_target.bd)
 	{
-		printf("failed to get device\n");
+		printf("<failed to get raid device from config>\n");
 		rv = 1; return NULL;
 	}
 	else
-		printf("got device with name %s\n", names[0]);
+		printf("got raid device with name [%s]\n", t->pls_target.bd->name);
 
 	//returns a descriptor
 	rv = spdk_bdev_open(t->pls_target.bd, 1, NULL, NULL, &t->pls_target.desc);
@@ -1102,12 +1142,14 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
-	rv = create_raid(global.devname[0], global.devname[1], global.num_blocks);	//XXX - num_blocks is 0 here..
+	rv = create_raid(global.devname[0], global.devname[1], spdk_align32pow2((uint32_t)global.kb));
 	if (rv)
 	{
 		printf("creating raid failed. exiting\n");
 		exit(1);
 	}
+
+	sleep(1);
 
 	// do odp init and create write threads only in these modes
 	if (global.mode == MODE_RW || global.mode == MODE_WRITE)
