@@ -366,7 +366,7 @@ int spdk_construct_raid_bdev(char *raidname, uint32_t raidsize, uint8_t raidleve
 		return -1;
 	}
 
-	free_rpc_construct_raid_bdev(&req);
+	//free_rpc_construct_raid_bdev(&req);
 
 /*
 	w = spdk_jsonrpc_begin_result(request);
