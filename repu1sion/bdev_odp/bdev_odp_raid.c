@@ -21,7 +21,7 @@
 #include "spdk/string.h"
 #include "spdk/queue.h"
 
-#define VERSION "0.98"
+#define VERSION "0.99"
 #define MB 1048576
 #define K4 4096
 #define SHM_PKT_POOL_BUF_SIZE  1856
@@ -618,7 +618,8 @@ int init_spdk(void)
 		//5th param hostnqn - host NVMe Qualified Name. used only for nvmeof.
 		//unused for local pcie connected devices
 		//There can be more than one bdev per NVMe controller since one bdev is created per namespace
-		rv = spdk_bdev_nvme_create(&trid[i], global.devname[i], names, &count, DEVICE_NAME_NQN);
+		rv = spdk_bdev_nvme_create(&trid[i], global.devname[i], 
+			&names[i], &count, DEVICE_NAME_NQN);
 		if (rv)
 		{
 			printf("error: can't create bdev device!\n");
@@ -626,7 +627,7 @@ int init_spdk(void)
 		}
 		for (j = 0; j < (int)count; j++) 
 		{
-			printf("#%d: device %s created \n", j, names[j]);
+			printf("#%d: device %s created \n", j, names[i]);
 		}
 	}
 
@@ -666,6 +667,10 @@ int init_spdk(void)
 int create_raid(char *devname1, char *devname2, size_t numblocks)
 {
 	int rv = 0;
+
+	printf("%s() called. devname1: %s, devname2: %s, size in Kb: %zu\n",
+		 __func__, devname1, devname2, numblocks);
+
 	//raid name, numblocks, raid lvl, num devices, name1, name2
 	rv = spdk_construct_raid_bdev(RAID_DEVICE, numblocks, 0, 2, devname1, devname2);
 	if (!rv)
@@ -1142,7 +1147,7 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
-	rv = create_raid(global.devname[0], global.devname[1], spdk_align32pow2((uint32_t)global.kb));
+	rv = create_raid(names[0], names[1], spdk_align32pow2((uint32_t)global.kb));
 	if (rv)
 	{
 		printf("creating raid failed. exiting\n");
