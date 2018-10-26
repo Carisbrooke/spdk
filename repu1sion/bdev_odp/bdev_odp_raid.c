@@ -2,6 +2,7 @@
 //continue to do IO from this thread
 
 #include <stdio.h>
+#include <time.h>
 #include <stdbool.h>
 #include <stdatomic.h>
 #include <pthread.h>
@@ -21,7 +22,7 @@
 #include "spdk/string.h"
 #include "spdk/queue.h"
 
-#define VERSION "1.00"
+#define VERSION "1.01"
 #define MB 1048576
 #define K4 4096
 #define SHM_PKT_POOL_BUF_SIZE  1856
@@ -72,6 +73,8 @@ typedef struct global_s
 	atomic_ulong overwrap_cnt;
 	atomic_ulong offset;		//global atomic offset for whole device
 	atomic_ulong wrote_offset;	//global atomic offset already guaranteed wrote
+	atomic_ulong stat_rcvd_bytes;	//bytes received by network from odp
+	atomic_ulong stat_wrtd_bytes;	//bytes writed to disk
 } global_t;
 
 global_t global;
@@ -361,7 +364,6 @@ int pls_pcap_create(void *bf)
 }
 
 //------------------------------------------------------------------------------
-atomic_ulong bytes_wrote = 0;
 
 //this callback called when write is completed
 static void pls_bdev_write_done_cb(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg)
@@ -375,6 +377,7 @@ static void pls_bdev_write_done_cb(struct spdk_bdev_io *bdev_io, bool success, v
 		debug("write completed successfully\n");
 		//cnt++;
 		__atomic_fetch_add(&cnt, 1, __ATOMIC_SEQ_CST);
+		global.stat_wrtd_bytes += BUFFER_SIZE;
 		if (global.wrote_offset < t->offset)
 			global.wrote_offset = t->offset;
 	}
@@ -860,7 +863,10 @@ void* init_thread(void *arg)
 	//odp
 	odp_event_t ev;
 	odp_packet_t pkt;
-	odp_time_t time;
+	odp_time_t o_time;
+
+	time_t old = 0, now = 0;
+	uint64_t old_bytes = 0, wrote_bytes = 0;
 
 	//printf("%s() called from thread #%d. offset: 0x%lx\n", __func__, t->idx, offset);
 
@@ -969,6 +975,24 @@ void* init_thread(void *arg)
 		if (!odp_packet_is_valid(pkt))
 			continue;
 		pkt_len = (int)odp_packet_len(pkt);
+
+		//stats
+		global.stat_rcvd_bytes += pkt_len; //increase atomic variable from every thread
+
+		if (t->idx == 0) //calculate stats only from thread 0
+		{
+			now = time(NULL);
+			if (now > old)
+			{
+				printf("rcvd_bytes per sec: %lu , wrote_bytes per sec: %lu\n",
+					global.stat_rcvd_bytes - old_bytes, 
+					global.stat_wrtd_bytes - wrote_bytes);
+				old = now;
+				old_bytes = global.stat_rcvd_bytes;
+				wrote_bytes = global.stat_wrtd_bytes;
+			}
+		}
+
 		//getting timestamp
 		rv = odp_packet_has_ts(pkt);
 #if 0
@@ -981,11 +1005,11 @@ void* init_thread(void *arg)
 		//converting HW timestamp to system time
 		if (rv)
 		{
-			time = odp_packet_ts(pkt);
-			debug("odp packet timestamp is %lu \n", time.nsec);
+			o_time = odp_packet_ts(pkt);
+			debug("odp packet timestamp is %lu \n", o_time.nsec);
 		}
 		else
-			time.nsec = 0;
+			o_time.nsec = 0;
 
 #ifdef DUMP_PACKET
 		debug("got packet with len: %d\n", pkt_len);
@@ -1006,14 +1030,14 @@ void* init_thread(void *arg)
 				//creating raw format header. 0xEE - magic byte (1byte)
 				t->buf[position++] = 0xEE;
 				//timestamp in uint64_t saved as big endian (8bytes)
-				t->buf[position++] = time.nsec >> 56 & 0xFF;
-				t->buf[position++] = time.nsec >> 48 & 0xFF;
-				t->buf[position++] = time.nsec >> 40 & 0xFF;
-				t->buf[position++] = time.nsec >> 32 & 0xFF;
-				t->buf[position++] = time.nsec >> 24 & 0xFF;
-				t->buf[position++] = time.nsec >> 16 & 0xFF;
-				t->buf[position++] = time.nsec >> 8 & 0xFF;
-				t->buf[position++] = time.nsec & 0xFF;
+				t->buf[position++] = o_time.nsec >> 56 & 0xFF;
+				t->buf[position++] = o_time.nsec >> 48 & 0xFF;
+				t->buf[position++] = o_time.nsec >> 40 & 0xFF;
+				t->buf[position++] = o_time.nsec >> 32 & 0xFF;
+				t->buf[position++] = o_time.nsec >> 24 & 0xFF;
+				t->buf[position++] = o_time.nsec >> 16 & 0xFF;
+				t->buf[position++] = o_time.nsec >> 8 & 0xFF;
+				t->buf[position++] = o_time.nsec & 0xFF;
 				
 				//packet len (2bytes)
 				len = (unsigned short)pkt_len;
