@@ -21,7 +21,7 @@
 #include "spdk/string.h"
 #include "spdk/queue.h"
 
-#define VERSION "0.99"
+#define VERSION "1.00"
 #define MB 1048576
 #define K4 4096
 #define SHM_PKT_POOL_BUF_SIZE  1856
@@ -40,6 +40,7 @@
 #define READ_LIMIT 0x100000000		//space for every thread to read
 
 //raid
+#define STRIPE_SIZE 512			//it's in Kb already
 #define RAID_DEVICE "pulseraid"
 #define NUM_RAID_DEVICES 2
 #define RAID1 "0000:04:00.0"
@@ -668,7 +669,7 @@ int create_raid(char *devname1, char *devname2, size_t numblocks)
 {
 	int rv = 0;
 
-	printf("%s() called. devname1: %s, devname2: %s, size in Kb: %zu\n",
+	printf("%s() called. devname1: %s, devname2: %s, stripe size in Kb: %zu\n",
 		 __func__, devname1, devname2, numblocks);
 
 	//raid name, numblocks, raid lvl, num devices, name1, name2
@@ -684,7 +685,7 @@ int create_raid(char *devname1, char *devname2, size_t numblocks)
 int init_odp(void)
 {
 	int rv = 0;
-	char devname[] = "0";	//XXX - make it parameter or so
+	char devport[] = "1";
 
 	rv = odp_init_global(&odp_instance, NULL, NULL);
 	if (rv) exit(1);
@@ -703,7 +704,7 @@ int init_odp(void)
 
 	pktio_param.in_mode = ODP_PKTIN_MODE_QUEUE;
 	printf("setting queue mode\n");
-	pktio = odp_pktio_open(devname, pool, &pktio_param);
+	pktio = odp_pktio_open(devport, pool, &pktio_param);
 	if (pktio == ODP_PKTIO_INVALID) 
 	{
 		printf("<failed to init pktio. exiting>\n");
@@ -1147,7 +1148,8 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
-	rv = create_raid(names[0], names[1], spdk_align32pow2((uint32_t)global.kb));
+	//dev0, dev1, stripe size in Kb (must be power of 2)
+	rv = create_raid(names[0], names[1], STRIPE_SIZE);
 	if (rv)
 	{
 		printf("creating raid failed. exiting\n");
