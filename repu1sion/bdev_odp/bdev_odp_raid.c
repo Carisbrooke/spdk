@@ -22,7 +22,7 @@
 #include "spdk/string.h"
 #include "spdk/queue.h"
 
-#define VERSION "1.01"
+#define VERSION "1.02"
 #define MB 1048576
 #define K4 4096
 #define SHM_PKT_POOL_BUF_SIZE  1856
@@ -866,7 +866,8 @@ void* init_thread(void *arg)
 	odp_time_t o_time;
 
 	time_t old = 0, now = 0;
-	uint64_t old_bytes = 0, wrote_bytes = 0;
+	uint64_t bytes = 0, old_bytes = 0, wrote_bytes = 0;
+	int itr = 0;
 
 	//printf("%s() called from thread #%d. offset: 0x%lx\n", __func__, t->idx, offset);
 
@@ -977,8 +978,19 @@ void* init_thread(void *arg)
 		pkt_len = (int)odp_packet_len(pkt);
 
 		//stats
-		global.stat_rcvd_bytes += pkt_len; //increase atomic variable from every thread
+		//global.stat_rcvd_bytes += pkt_len; //increase atomic variable from every thread
+		
 
+		//stats from local thread. we increase global atomic variable once per 1000 iterations
+		bytes += pkt_len;
+		itr++;
+		if (itr % 1000 == 0)
+		{
+			global.stat_rcvd_bytes += bytes;
+			itr = 0;
+			bytes = 0;
+		}
+#if 1
 		if (t->idx == 0) //calculate stats only from thread 0
 		{
 			now = time(NULL);
@@ -992,6 +1004,7 @@ void* init_thread(void *arg)
 				wrote_bytes = global.stat_wrtd_bytes;
 			}
 		}
+#endif
 
 		//getting timestamp
 		rv = odp_packet_has_ts(pkt);
