@@ -22,7 +22,7 @@
 #include "spdk/string.h"
 #include "spdk/queue.h"
 
-#define VERSION "1.02"
+#define VERSION "1.03"
 #define MB 1048576
 #define K4 4096
 #define SHM_PKT_POOL_BUF_SIZE  1856
@@ -759,7 +759,8 @@ void* init_read_thread(void *arg)
 
 	TAILQ_INIT(&t->pollers);
 
-	t->pls_target.bd = spdk_bdev_get_by_name(names[0]); //XXX - we always try to open device with idx 0
+/*
+	t->pls_target.bd = spdk_bdev_get_by_name(names[0]);
 	if (!t->pls_target.bd)
 	{
 		printf("failed to get device\n");
@@ -767,6 +768,24 @@ void* init_read_thread(void *arg)
 	}
 	else
 		printf("got device with name %s\n", names[0]);
+*/
+
+	struct raid_bdev_config *raid_cfg = NULL;
+	raid_cfg = raid_bdev_config_find_by_name(RAID_DEVICE);
+	if (!raid_cfg)
+	{
+		printf("<failed to get raid config>\n");
+		rv = 1; return NULL;
+	}
+
+	t->pls_target.bd = &raid_cfg->raid_bdev->bdev;
+	if (!t->pls_target.bd)
+	{
+		printf("<failed to get raid device from config>\n");
+		rv = 1; return NULL;
+	}
+	else
+		printf("got raid device with name [%s]\n", t->pls_target.bd->name);
 
 	//returns a descriptor
 	rv = spdk_bdev_open(t->pls_target.bd, 1, NULL, NULL, &t->pls_target.desc);
