@@ -9,11 +9,8 @@
 
 #include <odp_api.h>
 
-#include "../lib/bdev/nvme/bdev_nvme.h"
-
 #include "spdk/stdinc.h"
 #include "spdk/bdev.h"
-#include "../lib/bdev/raid/bdev_raid.h"
 #include "spdk/copy_engine.h"
 #include "spdk/conf.h"
 #include "spdk/env.h"
@@ -22,7 +19,10 @@
 #include "spdk/string.h"
 #include "spdk/queue.h"
 
-#define VERSION "1.03"
+#include "../lib/bdev/nvme/bdev_nvme.h"
+#include "../lib/bdev/raid/bdev_raid.h"
+
+#define VERSION "1.04"
 #define MB 1048576
 #define K4 4096
 #define SHM_PKT_POOL_BUF_SIZE  1856
@@ -48,6 +48,7 @@
 #define RAID2 "0000:05:00.0"
 
 //OPTIONS
+//#define OPTION_PCAP_CREATE
 //#define DUMP_PACKET
 //#define DEBUG
 #define HL_DEBUGS			//high level debugs - on writing buffers and counting callbacks
@@ -75,6 +76,7 @@ typedef struct global_s
 	atomic_ulong wrote_offset;	//global atomic offset already guaranteed wrote
 	atomic_ulong stat_rcvd_bytes;	//bytes received by network from odp
 	atomic_ulong stat_wrtd_bytes;	//bytes writed to disk
+	atomic_ulong stat_read_bytes;	//bytes read from disk
 } global_t;
 
 global_t global;
@@ -408,8 +410,9 @@ static void pls_bdev_read_done_cb(struct spdk_bdev_io *bdev_io, bool success, vo
 	if (success)
 	{
 		t->read_complete = true;
+		global.stat_read_bytes += BUFFER_SIZE;
 		__atomic_fetch_add(&cnt, 1, __ATOMIC_SEQ_CST);
-		//debug("read completed successfully\n");
+		debug("read completed successfully\n");
 	}
 	else
 		printf("read failed\n");
@@ -730,11 +733,12 @@ void* init_read_thread(void *arg)
 	int rv = 0;
 	uint64_t nbytes = BUFFER_SIZE;
 	pls_thread_t *t = &pls_read_thread;
-	uint64_t offset;
+	uint64_t offset = 0;
 	static uint64_t readbytes = 0;
 	void *bf;
 
-	offset = 0;
+	time_t old = 0, now = 0;
+	uint64_t old_bytes = 0;
 
 	t->ring = spdk_ring_create(SPDK_RING_TYPE_MP_SC, 4096, SPDK_ENV_SOCKET_ID_ANY);
 	if (!t->ring) 
@@ -804,7 +808,7 @@ void* init_read_thread(void *arg)
 		rv = -1; return NULL;
 	}
 
-	sleep(3);	//need to wait till we write some data
+	//sleep(3);	//need to wait till we write some data
 	printf("read thread started\n");
 
 	while(1)
@@ -836,7 +840,6 @@ void* init_read_thread(void *arg)
 
 		rv = spdk_bdev_read(t->pls_target.desc, t->pls_target.ch,
 			bf, offset, nbytes, pls_bdev_read_done_cb, t);
-		//printf("after spdk read\n");
 		if (rv)
 			printf("spdk_bdev_read failed\n");
 		else
@@ -845,6 +848,15 @@ void* init_read_thread(void *arg)
 			readbytes += nbytes;
 			//printf("spdk_bdev_read NO errors\n");
 		}
+
+		now = time(NULL);
+		if (now > old)
+		{
+			printf("read_bytes per sec: %lu\n", global.stat_read_bytes - old_bytes);
+			old = now;
+			old_bytes = global.stat_read_bytes;
+		}
+
 		//need to wait for bdev read completion first
 		while(t->read_complete == false)
 		{
@@ -854,12 +866,14 @@ void* init_read_thread(void *arg)
 		//parsing packets here and creating pcap
 		//in bf pointer we have buf with data read
 		//writing to .pcap file is also here
+		//
+#ifdef OPTION_PCAP_CREATE
 		int r = pls_pcap_create(bf);
 		if (r)
 		{
 			printf("error creating pcap\n");
 		}
-
+#endif
 		//print dump
 		//hexdump(bf, 2048);
 
@@ -1009,7 +1023,7 @@ void* init_thread(void *arg)
 			itr = 0;
 			bytes = 0;
 		}
-#if 1
+
 		if (t->idx == 0) //calculate stats only from thread 0
 		{
 			now = time(NULL);
@@ -1023,7 +1037,6 @@ void* init_thread(void *arg)
 				wrote_bytes = global.stat_wrtd_bytes;
 			}
 		}
-#endif
 
 		//getting timestamp
 		rv = odp_packet_has_ts(pkt);
