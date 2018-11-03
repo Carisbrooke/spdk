@@ -22,7 +22,7 @@
 #include "../lib/bdev/nvme/bdev_nvme.h"
 #include "../lib/bdev/raid/bdev_raid.h"
 
-#define VERSION "1.04"
+#define VERSION "1.10"
 #define MB 1048576
 #define K4 4096
 #define SHM_PKT_POOL_BUF_SIZE  1856
@@ -36,8 +36,8 @@
 
 #define EE_HEADER_SIZE 11
 #define FILE_NAME "dump.pcap"
-#define BUFFER_SIZE 1048576
-//#define BUFFER_SIZE 1024
+#define BUFFER_SIZE MB
+//#define BUFFER_SIZE 2048
 #define READ_LIMIT 0x100000000		//space for every thread to read
 
 //raid
@@ -48,10 +48,10 @@
 #define RAID2 "0000:05:00.0"
 
 //OPTIONS
-//#define OPTION_PCAP_CREATE
+#define OPTION_PCAP_CREATE
 //#define DUMP_PACKET
 //#define DEBUG
-#define HL_DEBUGS			//high level debugs - on writing buffers and counting callbacks
+//#define HL_DEBUGS			//high level debugs - on writing buffers and counting callbacks
 
 #ifdef DEBUG
  #define debug(x...) printf(x)
@@ -161,6 +161,8 @@ int init_spdk(void);
 int init_odp(void);
 int create_raid(char*, char*, size_t);
 
+pthread_mutex_t hexdump_mtx = PTHREAD_MUTEX_INITIALIZER;
+
 void hexdump(void *addr, unsigned int size)
 {
         unsigned int i;
@@ -168,6 +170,8 @@ void hexdump(void *addr, unsigned int size)
         unsigned char *p = (unsigned char*)addr;
 
         //printf("addr : %p \n", addr);
+        
+	pthread_mutex_lock(&hexdump_mtx);
 
         if (!size)
         {
@@ -185,6 +189,8 @@ void hexdump(void *addr, unsigned int size)
                 }
                 printf("%02X ", p[i]); /* space here */
         }
+
+	pthread_mutex_unlock(&hexdump_mtx);
 
         printf("\n");
 }
@@ -275,8 +281,10 @@ int pls_pcap_file_create(char *name)
 	if (rv < 0)
 	{
 		printf("write to file failed!\n");
+		free(p);
 		return rv;
 	}
+	free(p);
 
 	return fd;
 }
@@ -294,6 +302,9 @@ int pls_pcap_create(void *bf)
 	unsigned short len = 0;
 	uint64_t ts = 0, t = 0;
 	pcap_pkthdr_t pkthdr;
+	unsigned char *buf = NULL;
+	unsigned int buf_size = BUFFER_SIZE;
+	unsigned int pos = 0;
 
 	//debug("%s() called \n", __func__);
 
@@ -308,10 +319,20 @@ int pls_pcap_create(void *bf)
 		fd = rv;
 		firstrun = false;
 	}
+
+	if (!buf)
+	{
+		buf = calloc(1, buf_size);
+		if (!buf) {printf("can't alloc ram\n"); return -1;}
+	}
+
+	//printf("buffer read, before parsing 0xEE format\n");
+	//hexdump(p, BUFFER_SIZE);
 	
 	//parsing packets
 	for (i = 0; i < BUFFER_SIZE; i++)
 	{
+		//printf("i: %d, 0x%X\n", i, p[i]);
 		if (p[i] == 0xEE)
 		{
 			new_packet = true;
@@ -333,31 +354,47 @@ int pls_pcap_create(void *bf)
 			i++;
 			len |= p[i];
 			new_packet = false;
+			if (!len) //check for packet sanity, if no len - skip
+				continue;
+			if (len > 1000)
+				printf("during reading 0xEE format we have len: %d , at addr: %p\n", len, p+i);
 			new_len = true; 
-			debug("new packet len: %d , ts: %lu \n", len, ts);
+			//printf("new packet len: %d , ts: %lu \n", len, ts);
 			continue;
 		}
 		if (new_len)
 		{
+			if (pos + sizeof(pcap_pkthdr_t) + len >= buf_size)
+			{
+				rv = write(fd, buf, pos);
+				if (rv < 0)
+				{
+					printf("write to file failed!\n");
+					return rv;
+				}
+				else
+				{
+					printf("wrote to file %u bytes \n", pos);
+				}
+
+				pos = 0;
+				//free old one and allocate a new buf
+				free(buf);
+				buf = calloc(1, buf_size);
+				if (!buf) {printf("can't alloc ram\n"); return -1;}
+			}
+
 			memset(&pkthdr, 0x0, sizeof(pcap_pkthdr_t));
 			pkthdr.incl_len = pkthdr.orig_len = len;
 			pkthdr.ts_sec = (bpf_u_int32)(ts / 1000000000);
 			pkthdr.ts_usec = (bpf_u_int32)(ts % 1000000000);
 			debug("len: %u, ts_sec: %u, ts_usec: %u \n", 
 				pkthdr.orig_len, pkthdr.ts_sec, pkthdr.ts_usec);
-			rv = write(fd, &pkthdr, sizeof(pcap_pkthdr_t));
-			if (rv < 0)
-			{
-				//printf("write to file failed!\n");
-				return rv;
-			}
-			//write whole packet here
-			rv = write(fd, p+i, len);
-			if (rv < 0)
-			{
-				//printf("write to file failed!\n");
-				return rv;
-			}
+			memcpy(buf+pos, &pkthdr, sizeof(pcap_pkthdr_t));
+			pos += sizeof(pcap_pkthdr_t);
+			memcpy(buf+pos, p+i, len);
+			pos += len;
+			i += len - 1; //we skip till next 0xEE
 			new_len = false;
 		}
 	}
@@ -391,7 +428,9 @@ static void pls_bdev_write_done_cb(struct spdk_bdev_io *bdev_io, bool success, v
 		printf("have %u successful write callabacks. thread #%d, offset: 0x%lx \n",
 			 cnt, t->idx, t->offset);
 #endif
-	debug("before freeing ram in callback at addr: %p \n", t->buf); 
+	debug("before freeing ram in callback at addr: %p \n", t->buf);
+	//hexdump(t->buf, BUFFER_SIZE);
+ 
 	spdk_dma_free(t->buf);
 	debug("after freeing ram in callback at addr: %p \n", t->buf); 
 	t->buf = NULL;
@@ -808,7 +847,7 @@ void* init_read_thread(void *arg)
 		rv = -1; return NULL;
 	}
 
-	//sleep(3);	//need to wait till we write some data
+	sleep(3);	//need to wait till we write some data
 	printf("read thread started\n");
 
 	while(1)
@@ -871,7 +910,7 @@ void* init_read_thread(void *arg)
 		int r = pls_pcap_create(bf);
 		if (r)
 		{
-			printf("error creating pcap\n");
+			printf("error creating or writing to pcap file\n");
 		}
 #endif
 		//print dump
@@ -977,22 +1016,12 @@ void* init_thread(void *arg)
 	//odp thread init
 	rv = odp_init_local(odp_instance, ODP_THREAD_WORKER);
 
-#if 0
-	if (global.mode == MODE_READ)
-	{
-		if (t->idx == 0)
-			goto read;
-		else
-			return NULL;
-	}
-#endif
-
 	while(1)
 	{
 		//1. if no buffer - allocate it
 		if (!t->buf)
 		{
-			t->buf = spdk_dma_zmalloc(nbytes, 0x100000, NULL); //last param - ptr to phys addr(OUT)
+			t->buf = spdk_dma_zmalloc(nbytes, 0, NULL); //last param - ptr to phys addr(OUT)
 			if (!t->buf) 
 			{
 				printf("ERROR: write buffer allocation failed\n");
@@ -1010,9 +1039,7 @@ void* init_thread(void *arg)
 			continue;
 		pkt_len = (int)odp_packet_len(pkt);
 
-		//stats
 		//global.stat_rcvd_bytes += pkt_len; //increase atomic variable from every thread
-		
 
 		//stats from local thread. we increase global atomic variable once per 1000 iterations
 		bytes += pkt_len;
@@ -1040,21 +1067,18 @@ void* init_thread(void *arg)
 
 		//getting timestamp
 		rv = odp_packet_has_ts(pkt);
-#if 0
-		if (rv)
-			printf("packet HAS a timestamp\n");
-		else
-			printf("packet has NO timestamp\n");
-#endif
 
 		//converting HW timestamp to system time
 		if (rv)
 		{
 			o_time = odp_packet_ts(pkt);
-			debug("odp packet timestamp is %lu \n", o_time.nsec);
+			//debug("odp packet timestamp is %lu \n", o_time.nsec);
 		}
 		else
 			o_time.nsec = 0;
+		//XXX
+		if (pkt_len > 1000)
+			printf("have big packet!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! with len: %d \n", pkt_len);
 
 #ifdef DUMP_PACKET
 		debug("got packet with len: %d\n", pkt_len);
@@ -1069,34 +1093,7 @@ void* init_thread(void *arg)
 		//in position we count num of bytes copied into buffer. 
 		if (pkt_len)
 		{
-			if (position + pkt_len + EE_HEADER_SIZE < nbytes)
-			{
-				//debug("copying packet\n");
-				//creating raw format header. 0xEE - magic byte (1byte)
-				t->buf[position++] = 0xEE;
-				//timestamp in uint64_t saved as big endian (8bytes)
-				t->buf[position++] = o_time.nsec >> 56 & 0xFF;
-				t->buf[position++] = o_time.nsec >> 48 & 0xFF;
-				t->buf[position++] = o_time.nsec >> 40 & 0xFF;
-				t->buf[position++] = o_time.nsec >> 32 & 0xFF;
-				t->buf[position++] = o_time.nsec >> 24 & 0xFF;
-				t->buf[position++] = o_time.nsec >> 16 & 0xFF;
-				t->buf[position++] = o_time.nsec >> 8 & 0xFF;
-				t->buf[position++] = o_time.nsec & 0xFF;
-				
-				//packet len (2bytes)
-				len = (unsigned short)pkt_len;
-				t->buf[position++] = len >> 8;
-				t->buf[position++] = len & 0x00FF;
-				//copying odp packet 
-				memcpy(t->buf+position, odp_packet_l2_ptr(pkt, NULL), pkt_len);
-#ifdef DUMP_PACKET
-				hexdump(t->buf+position-EE_HEADER_SIZE , pkt_len+EE_HEADER_SIZE);
-#endif
-				odp_schedule_release_atomic();
-				position += pkt_len;
-			}
-			else
+			if (position + EE_HEADER_SIZE + pkt_len >= nbytes)
 			{
 				//get global atomic offset value, increase it before writing.
 				//t->offset used  in read/write callbacks
@@ -1123,7 +1120,6 @@ void* init_thread(void *arg)
 					printf("writing %lu bytes from thread# #%d, offset: 0x%lx\n",
 						nbytes, t->idx, offset);
 #endif
-
 				//need to wait for bdev write completion first
 				while(t->buf)
 				{
@@ -1132,17 +1128,40 @@ void* init_thread(void *arg)
 				position = 0;
 
 				//allocate new buffer and place packet to it
-				t->buf = spdk_dma_zmalloc(nbytes, 0x100000, NULL);
+				t->buf = spdk_dma_zmalloc(nbytes, 0, NULL);
 				if (!t->buf) 
 				{
 					printf("ERROR: write buffer allocation failed\n");
 					return NULL;
 				}
 				debug("allocated spdk dma buffer with addr: %p\n", t->buf);
-
+			}
+			else
+			{
+				//creating raw format header. 0xEE - magic byte (1byte)
+				t->buf[position++] = 0xEE;
+				//timestamp in uint64_t saved as big endian (8bytes)
+				t->buf[position++] = o_time.nsec >> 56 & 0xFF;
+				t->buf[position++] = o_time.nsec >> 48 & 0xFF;
+				t->buf[position++] = o_time.nsec >> 40 & 0xFF;
+				t->buf[position++] = o_time.nsec >> 32 & 0xFF;
+				t->buf[position++] = o_time.nsec >> 24 & 0xFF;
+				t->buf[position++] = o_time.nsec >> 16 & 0xFF;
+				t->buf[position++] = o_time.nsec >> 8 & 0xFF;
+				t->buf[position++] = o_time.nsec & 0xFF;
+				
+				//packet len (2bytes)
+				len = (unsigned short)pkt_len;
+				t->buf[position++] = len >> 8;
+				t->buf[position++] = len & 0x00FF;
+				//copying odp packet 
 				memcpy(t->buf+position, odp_packet_l2_ptr(pkt, NULL), pkt_len);
+#ifdef DUMP_PACKET
+				hexdump(t->buf+position-EE_HEADER_SIZE , pkt_len+EE_HEADER_SIZE);
+#endif
 				odp_schedule_release_atomic();
 				position += pkt_len;
+
 			}
 		}
 		odp_packet_free(pkt);
