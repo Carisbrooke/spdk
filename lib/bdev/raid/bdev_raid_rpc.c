@@ -294,7 +294,8 @@ SPDK_RPC_REGISTER("construct_raid_bdev", spdk_rpc_construct_raid_bdev, SPDK_RPC_
 
 //repu1sion
 //strip_size - raid size in blocks
-int spdk_construct_raid_bdev(char *raidname, uint32_t raidsize, uint8_t raidlevel, size_t numdevices, char *dev1, char *dev2)
+int spdk_construct_raid_bdev(char *raidname, uint32_t raidsize, uint8_t raidlevel, 
+				size_t numdevices, const char *dev1, const char *dev2)
 {
 	struct rpc_construct_raid_bdev req = {};
 	//struct spdk_json_write_ctx     *w;
@@ -306,8 +307,8 @@ int spdk_construct_raid_bdev(char *raidname, uint32_t raidsize, uint8_t raidleve
 	req.strip_size = raidsize;
 	req.raid_level = raidlevel;
 	req.base_bdevs.num_base_bdevs = numdevices;
-	req.base_bdevs.base_bdevs[0] = dev1;
-	req.base_bdevs.base_bdevs[1] = dev2;
+	req.base_bdevs.base_bdevs[0] = (char*)dev1;
+	req.base_bdevs.base_bdevs[1] = (char*)dev2;
 
 /*
 	if (spdk_json_decode_object(params, rpc_construct_raid_bdev_decoders,

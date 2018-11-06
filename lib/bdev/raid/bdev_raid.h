@@ -221,6 +221,6 @@ struct raid_bdev_config *raid_bdev_config_find_by_name(const char *raid_name);
 
 //repu1sion
 int spdk_construct_raid_bdev(char *raidname, uint32_t raidsize, uint8_t raidlevel, size_t numdevices,
-			     char *dev1, char *dev2);
+			     const char *dev1, const char *dev2);
 
 #endif // SPDK_BDEV_RAID_INTERNAL_H
