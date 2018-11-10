@@ -22,7 +22,10 @@
 #include "../lib/bdev/nvme/bdev_nvme.h"
 #include "../lib/bdev/raid/bdev_raid.h"
 
-#define VERSION "1.10"
+#define likely(x)       __builtin_expect((x),1)
+#define unlikely(x)     __builtin_expect((x),0)
+
+#define VERSION "1.11"
 #define MB 1048576
 #define K4 4096
 #define SHM_PKT_POOL_BUF_SIZE  1856
@@ -159,7 +162,7 @@ void* init_thread(void*);
 void* init_read_thread(void *arg);
 int init_spdk(void);
 int init_odp(void);
-int create_raid(char*, char*, size_t);
+int create_raid(const char*, const char*, size_t);
 
 pthread_mutex_t hexdump_mtx = PTHREAD_MUTEX_INITIALIZER;
 
@@ -308,7 +311,7 @@ int pls_pcap_create(void *bf)
 
 	//debug("%s() called \n", __func__);
 
-	if (firstrun)
+	if (unlikely(firstrun))
 	{
 		rv = pls_pcap_file_create(FILE_NAME);
 		if (rv <= 0)
@@ -329,7 +332,7 @@ int pls_pcap_create(void *bf)
 	//printf("buffer read, before parsing 0xEE format\n");
 	//hexdump(p, BUFFER_SIZE);
 	
-	//parsing packets
+	//parsing packets in 0xEE format here
 	for (i = 0; i < BUFFER_SIZE; i++)
 	{
 		//printf("i: %d, 0x%X\n", i, p[i]);
@@ -356,10 +359,11 @@ int pls_pcap_create(void *bf)
 			new_packet = false;
 			if (!len) //check for packet sanity, if no len - skip
 				continue;
-			if (len > 1000)
-				printf("during reading 0xEE format we have len: %d , at addr: %p\n", len, p+i);
+			if (len > MAX_PACKET_SIZE)
+				printf("parsing 0xEE format we have big len: %d , at addr: %p\n",
+					len, p+i);
 			new_len = true; 
-			//printf("new packet len: %d , ts: %lu \n", len, ts);
+			debug("new packet len: %d , ts: %lu \n", len, ts);
 			continue;
 		}
 		if (new_len)
@@ -710,7 +714,7 @@ int init_spdk(void)
 	return rv;
 }
 
-int create_raid(char *devname1, char *devname2, size_t numblocks)
+int create_raid(const char *devname1, const char *devname2, size_t numblocks)
 {
 	int rv = 0;
 
@@ -1076,10 +1080,9 @@ void* init_thread(void *arg)
 		}
 		else
 			o_time.nsec = 0;
-		//XXX
-		if (pkt_len > 1000)
-			printf("have big packet!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! with len: %d \n", pkt_len);
 
+		if (pkt_len > MAX_PACKET_SIZE)
+			printf("have big packet with len: %d \n", pkt_len);
 #ifdef DUMP_PACKET
 		debug("got packet with len: %d\n", pkt_len);
 		hexdump(odp_packet_l2_ptr(pkt, NULL), pkt_len);
@@ -1107,7 +1110,8 @@ void* init_thread(void *arg)
 					t->offset = offset = global.offset;
 					global.offset += nbytes;
 					global.overwrap_cnt++;
-					printf("overwrap is done. now overwraps: %lu \n", global.overwrap_cnt);
+					printf("overwrap is done. now overwraps: %lu \n",
+						global.overwrap_cnt);
 				}
 
 				rv = spdk_bdev_write(t->pls_target.desc, t->pls_target.ch, 
