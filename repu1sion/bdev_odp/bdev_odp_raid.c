@@ -25,7 +25,7 @@
 #define likely(x)       __builtin_expect((x),1)
 #define unlikely(x)     __builtin_expect((x),0)
 
-#define VERSION "1.11"
+#define VERSION "1.12"
 #define MB 1048576
 #define K4 4096
 #define SHM_PKT_POOL_BUF_SIZE  1856
@@ -38,7 +38,7 @@
 #define NUM_INPUT_Q 4
 
 #define EE_HEADER_SIZE 11
-#define FILE_NAME "dump.pcap"
+#define FILE_NAME "/mnt/dump.pcap"
 #define BUFFER_SIZE MB
 //#define BUFFER_SIZE 2048
 #define READ_LIMIT 0x100000000		//space for every thread to read
@@ -246,7 +246,7 @@ struct pcap_file_header* pls_pcap_gl_header(void)
 	return &hdr;
 }
 
-//@name - filename, @buf - OUT ptr to buffer. returns file descriptor
+//@name - filename. returns file descriptor
 int pls_pcap_file_create(char *name)
 {
 	int rv, fd;
@@ -262,21 +262,19 @@ int pls_pcap_file_create(char *name)
 		return rv;
 	}
 
-	p = malloc(MB);
+	p = malloc(sizeof(struct pcap_file_header));
 	if (!p)
 	{
 		printf("error during ram allocation\n");
 		rv = -1; return rv;
 	}
 
-	memset(p, 0x0, MB);
+	memset(p, 0x0, sizeof(struct pcap_file_header));
 	memcpy(p, pls_pcap_gl_header(), sizeof(struct pcap_file_header));
 	off += sizeof(struct pcap_file_header);
 
-	printf("pcap global file header dump:\n");
-	hexdump(p, sizeof(struct pcap_file_header));
-
-	//buf = p;
+	/* printf("pcap global file header dump:\n");
+	hexdump(p, sizeof(struct pcap_file_header)); */
 
 	//writing pcap global header to file
 	fd = rv;
@@ -309,10 +307,11 @@ int pls_pcap_create(void *bf)
 	unsigned int buf_size = BUFFER_SIZE;
 	unsigned int pos = 0;
 
-	//debug("%s() called \n", __func__);
+	debug("%s() called \n", __func__);
 
 	if (unlikely(firstrun))
 	{
+		debug("firstrun\n");
 		rv = pls_pcap_file_create(FILE_NAME);
 		if (rv <= 0)
 		{
@@ -374,13 +373,13 @@ int pls_pcap_create(void *bf)
 				if (rv < 0)
 				{
 					printf("write to file failed!\n");
+					free(buf);
 					return rv;
 				}
+#ifdef HL_DEBUGS
 				else
-				{
 					printf("wrote to file %u bytes \n", pos);
-				}
-
+#endif
 				pos = 0;
 				//free old one and allocate a new buf
 				free(buf);
@@ -402,6 +401,9 @@ int pls_pcap_create(void *bf)
 			new_len = false;
 		}
 	}
+
+	if (buf)
+		free(buf);
 
 	return 0;	//in case of error - we return rv before, so always 0 here
 }
@@ -876,9 +878,10 @@ void* init_read_thread(void *arg)
 					usleep(100000);		
 				}
 			}
-
+#ifdef HL_DEBUGS
 			printf("read now. read_offset: 0x%lx , wr0te_offset: 0x%lx \n",
 				offset, global.wrote_offset);
+#endif
 		}
 
 		rv = spdk_bdev_read(t->pls_target.desc, t->pls_target.ch,
