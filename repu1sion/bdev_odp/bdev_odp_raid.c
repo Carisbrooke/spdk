@@ -25,7 +25,7 @@
 #define likely(x)       __builtin_expect((x),1)
 #define unlikely(x)     __builtin_expect((x),0)
 
-#define VERSION "1.12"
+#define VERSION "1.15b"
 #define MB 1048576
 #define K4 4096
 #define SHM_PKT_POOL_BUF_SIZE  1856
@@ -54,7 +54,12 @@
 #define OPTION_PCAP_CREATE
 //#define DUMP_PACKET
 //#define DEBUG
-//#define HL_DEBUGS			//high level debugs - on writing buffers and counting callbacks
+#define HL_DEBUGS			//high level debugs - on writing buffers and counting callbacks
+//#define NOTZERO_OFFSET		//start not with 0x0 offset
+
+#ifdef NOTZERO_OFFSET
+ #define START_OFFSET 0x1d000000000
+#endif
 
 #ifdef DEBUG
  #define debug(x...) printf(x)
@@ -71,10 +76,11 @@ typedef struct global_s
 	char devname[NUM_RAID_DEVICES][30];
 	uint32_t block_size;
 	uint64_t num_blocks;
-	uint64_t max_offset;
+	uint64_t max_offset;		//max writable offset
 	uint64_t bytes;
  	uint64_t kb;
 	atomic_ulong overwrap_cnt;
+	atomic_ulong overwrap_read_cnt;
 	atomic_ulong offset;		//global atomic offset for whole device
 	atomic_ulong wrote_offset;	//global atomic offset already guaranteed wrote
 	atomic_ulong stat_rcvd_bytes;	//bytes received by network from odp
@@ -423,8 +429,9 @@ static void pls_bdev_write_done_cb(struct spdk_bdev_io *bdev_io, bool success, v
 		//cnt++;
 		__atomic_fetch_add(&cnt, 1, __ATOMIC_SEQ_CST);
 		global.stat_wrtd_bytes += BUFFER_SIZE;
-		if (global.wrote_offset < t->offset)
-			global.wrote_offset = t->offset;
+		if (global.wrote_offset < t->offset) //XXX - what if thread3 finish faster than thread2?
+			if (t->offset < global.wrote_offset + BUFFER_SIZE*NUM_THREADS)//diff must not be big!
+				global.wrote_offset = t->offset;
 	}
 	else
 		printf("write failed\n");
@@ -781,9 +788,12 @@ void* init_read_thread(void *arg)
 	uint64_t offset = 0;
 	static uint64_t readbytes = 0;
 	void *bf;
-
 	time_t old = 0, now = 0;
 	uint64_t old_bytes = 0;
+	//unsigned long ow = 0, or = 0;
+#ifdef NOTZERO_OFFSET
+	offset = START_OFFSET;
+#endif
 
 	t->ring = spdk_ring_create(SPDK_RING_TYPE_MP_SC, 4096, SPDK_ENV_SOCKET_ID_ANY);
 	if (!t->ring) 
@@ -869,14 +879,22 @@ void* init_read_thread(void *arg)
 		//wait here till threads do some writing
 		if (global.mode == MODE_RW)
 		{
-			if (global.overwrap_cnt == 0)
+#if 0
+			or = atomic_load(&global.overwrap_read_cnt);
+			ow = atomic_load(&global.overwrap_cnt);
+			printf("before if. or: %lu, ow: %lu \n", or, ow);
+			if (or == ow)
+#endif
+			while (offset + BUFFER_SIZE >= global.wrote_offset)
 			{
-				while (offset + BUFFER_SIZE >= global.wrote_offset)
-				{
-					printf("read wait. read_offset: 0x%lx , wr0te_offset: 0x%lx \n",
-						offset, global.wrote_offset);
-					usleep(100000);		
-				}
+			 if (global.overwrap_read_cnt == global.overwrap_cnt)
+			 {
+			  printf("read wait. read_offset: 0x%lx , wr0te_offset: 0x%lx, or:%lu, ow:%lu \n",
+			   offset, global.wrote_offset, global.overwrap_read_cnt, global.overwrap_cnt);
+			  usleep(100000);
+			 }
+			 else
+			  break;
 			}
 #ifdef HL_DEBUGS
 			printf("read now. read_offset: 0x%lx , wr0te_offset: 0x%lx \n",
@@ -893,6 +911,12 @@ void* init_read_thread(void *arg)
 			offset += nbytes;
 			readbytes += nbytes;
 			//printf("spdk_bdev_read NO errors\n");
+		}
+		if (offset + BUFFER_SIZE > global.max_offset)
+		{
+			global.overwrap_read_cnt++;
+			offset = 0;
+			printf("read overwrap: %lu. read offset reset to 0\n", global.overwrap_read_cnt);
 		}
 
 		now = time(NULL);
@@ -1110,6 +1134,7 @@ void* init_thread(void *arg)
 				if (global.offset > global.max_offset)
 				{
 					global.offset = 0;
+					global.wrote_offset = 0;
 					t->offset = offset = global.offset;
 					global.offset += nbytes;
 					global.overwrap_cnt++;
@@ -1196,6 +1221,11 @@ int main(int argc, char *argv[])
 	
 	//global init
 	memset(&global, 0x0, sizeof(global));
+
+#ifdef NOTZERO_OFFSET
+	global.offset = START_OFFSET;
+	global.wrote_offset = START_OFFSET;
+#endif
 	switch (mode)
 	{
 		case 'w':
