@@ -25,7 +25,7 @@
 #define likely(x)       __builtin_expect((x),1)
 #define unlikely(x)     __builtin_expect((x),0)
 
-#define VERSION "1.16"
+#define VERSION "1.17"
 #define MB 1048576
 #define K4 4096
 #define SHM_PKT_POOL_BUF_SIZE  1856
@@ -51,6 +51,7 @@
 
 //OPTIONS
 #define OPTION_PCAP_CREATE
+//#define SHOW_STATS			//speed statistics
 //#define DUMP_PACKET
 //#define DEBUG
 //#define HL_DEBUGS			//high level debugs - on writing buffers and counting callbacks
@@ -767,8 +768,10 @@ void* init_read_thread(void *arg)
 	uint64_t offset = 0;
 	static uint64_t readbytes = 0;
 	void *bf;
+#ifdef SHOW_STATS
 	time_t old = 0, now = 0;
 	uint64_t old_bytes = 0;
+#endif
 #ifdef NOTZERO_OFFSET
 	offset = START_OFFSET;
 #endif
@@ -891,6 +894,7 @@ void* init_read_thread(void *arg)
 			printf("read overwrap: %lu. read offset reset to 0\n", global.overwrap_read_cnt);
 		}
 
+#ifdef SHOW_STATS
 		now = time(NULL);
 		if (now > old)
 		{
@@ -898,6 +902,7 @@ void* init_read_thread(void *arg)
 			old = now;
 			old_bytes = global.stat_read_bytes;
 		}
+#endif
 
 		//need to wait for bdev read completion first
 		while(t->read_complete == false)
@@ -939,10 +944,11 @@ void* init_thread(void *arg)
 	odp_event_t ev;
 	odp_packet_t pkt;
 	odp_time_t o_time;
-
+#ifdef SHOW_STATS
 	time_t old = 0, now = 0;
 	uint64_t bytes = 0, old_bytes = 0, wrote_bytes = 0;
 	int itr = 0;
+#endif
 
 	//printf("%s() called from thread #%d. offset: 0x%lx\n", __func__, t->idx, offset);
 
@@ -1044,6 +1050,7 @@ void* init_thread(void *arg)
 
 		//global.stat_rcvd_bytes += pkt_len; //increase atomic variable from every thread
 
+#ifdef SHOW_STATS
 		//stats from local thread. we increase global atomic variable once per 1000 iterations
 		bytes += pkt_len;
 		itr++;
@@ -1067,6 +1074,7 @@ void* init_thread(void *arg)
 				wrote_bytes = global.stat_wrtd_bytes;
 			}
 		}
+#endif
 
 		//getting timestamp
 		rv = odp_packet_has_ts(pkt);
