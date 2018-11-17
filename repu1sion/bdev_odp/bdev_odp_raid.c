@@ -25,7 +25,7 @@
 #define likely(x)       __builtin_expect((x),1)
 #define unlikely(x)     __builtin_expect((x),0)
 
-#define VERSION "1.15b"
+#define VERSION "1.16"
 #define MB 1048576
 #define K4 4096
 #define SHM_PKT_POOL_BUF_SIZE  1856
@@ -38,10 +38,9 @@
 #define NUM_INPUT_Q 4
 
 #define EE_HEADER_SIZE 11
-#define FILE_NAME "/mnt/dump.pcap"
+#define FILE_NAME "/mnt/dump2.pcap"
 #define BUFFER_SIZE MB
 //#define BUFFER_SIZE 2048
-#define READ_LIMIT 0x100000000		//space for every thread to read
 
 //raid
 #define STRIPE_SIZE 512			//it's in Kb already
@@ -54,8 +53,8 @@
 #define OPTION_PCAP_CREATE
 //#define DUMP_PACKET
 //#define DEBUG
-#define HL_DEBUGS			//high level debugs - on writing buffers and counting callbacks
-//#define NOTZERO_OFFSET		//start not with 0x0 offset
+//#define HL_DEBUGS			//high level debugs - on writing buffers and counting callbacks
+//#define NOTZERO_OFFSET		//start not with 0x0 offset (for overwrap tests)
 
 #ifdef NOTZERO_OFFSET
  #define START_OFFSET 0x1d000000000
@@ -88,22 +87,6 @@ typedef struct global_s
 	atomic_ulong stat_read_bytes;	//bytes read from disk
 } global_t;
 
-global_t global;
-
-/*
-static global_t global = 
-{
-	.mode = MODE_WRITE,
-	.pci_nvme_addr[NUM_RAID_DEVICES] = {{0}},
-	.block_size = 0,
-	.num_blocks = 0,
-	.max_offset = 0,
-	.overwrap_cnt = 0,
-	.offset = 0,
-	.wrote_offset = 0,
-};
-*/
-
 /* Used to pass messages between fio threads */
 struct pls_msg {
 	spdk_thread_fn	cb_fn;
@@ -127,11 +110,10 @@ typedef struct pls_thread_s
         unsigned char *buf;
 	uint64_t offset;		//just for stats
 	pthread_t pthread_desc;
-        struct spdk_thread *thread; /* spdk thread context */
-        struct spdk_ring *ring; /* ring for passing messages to this thread */
+        struct spdk_thread *thread; 	/* spdk thread context */
+        struct spdk_ring *ring; 	/* ring for passing messages to this thread */
 	pls_target_t pls_target;
 	TAILQ_HEAD(, pls_poller) pollers; /* List of registered pollers on this thread */
-
 } pls_thread_t;
 
 /* A polling function */
@@ -143,6 +125,7 @@ struct pls_poller
 	TAILQ_ENTRY(pls_poller)	link;
 };
 
+global_t global;
 const char *names[NVME_MAX_BDEVS_PER_RPC];
 pls_thread_t pls_ctrl_thread;
 pls_thread_t pls_read_thread;
@@ -184,7 +167,7 @@ void hexdump(void *addr, unsigned int size)
 
         if (!size)
         {
-                printf("bad size %u\n",size);
+                printf("bad size %u\n", size);
                 return;
         }
 
@@ -203,13 +186,6 @@ void hexdump(void *addr, unsigned int size)
 
         printf("\n");
 }
-
-static void pls_bdev_init_done(void *cb_arg, int rc)
-{
-	printf("bdev init is done\n");
-	*(bool *)cb_arg = true;
-}
-
 //------------------------------------------------------------------------------
 //PCAP functions
 //------------------------------------------------------------------------------
@@ -333,9 +309,10 @@ int pls_pcap_create(void *bf)
 		buf = calloc(1, buf_size);
 		if (!buf) {printf("can't alloc ram\n"); return -1;}
 	}
-
-	//printf("buffer read, before parsing 0xEE format\n");
-	//hexdump(p, BUFFER_SIZE);
+#ifdef DUMP_PACKET
+	debug("buffer read, before parsing 0xEE format\n");
+	hexdump(p, BUFFER_SIZE);
+#endif
 	
 	//parsing packets in 0xEE format here
 	for (i = 0; i < BUFFER_SIZE; i++)
@@ -414,7 +391,12 @@ int pls_pcap_create(void *bf)
 	return 0;	//in case of error - we return rv before, so always 0 here
 }
 
-//------------------------------------------------------------------------------
+//-----------------------bdev functions-----------------------------------------
+static void pls_bdev_init_done(void *cb_arg, int rc)
+{
+	printf("bdev init is done\n");
+	*(bool *)cb_arg = true;
+}
 
 //this callback called when write is completed
 static void pls_bdev_write_done_cb(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg)
@@ -578,9 +560,6 @@ int init_spdk(void)
 	printf("%s() called \n", __func__);
 
 	/* Parse the SPDK configuration file */
-
-	//just allocate mem via calloc
-	//
 #if 0
 	config = spdk_conf_allocate();
 	if (!config) {
@@ -743,7 +722,7 @@ int create_raid(const char *devname1, const char *devname2, size_t numblocks)
 int init_odp(void)
 {
 	int rv = 0;
-	char devport[] = "1";
+	char devport[] = "1";	//XXX - make another option for CLI
 
 	rv = odp_init_global(&odp_instance, NULL, NULL);
 	if (rv) exit(1);
@@ -790,7 +769,6 @@ void* init_read_thread(void *arg)
 	void *bf;
 	time_t old = 0, now = 0;
 	uint64_t old_bytes = 0;
-	//unsigned long ow = 0, or = 0;
 #ifdef NOTZERO_OFFSET
 	offset = START_OFFSET;
 #endif
@@ -879,12 +857,6 @@ void* init_read_thread(void *arg)
 		//wait here till threads do some writing
 		if (global.mode == MODE_RW)
 		{
-#if 0
-			or = atomic_load(&global.overwrap_read_cnt);
-			ow = atomic_load(&global.overwrap_cnt);
-			printf("before if. or: %lu, ow: %lu \n", or, ow);
-			if (or == ow)
-#endif
 			while (offset + BUFFER_SIZE >= global.wrote_offset)
 			{
 			 if (global.overwrap_read_cnt == global.overwrap_cnt)
