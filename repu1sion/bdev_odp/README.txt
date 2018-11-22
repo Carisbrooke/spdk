@@ -46,3 +46,9 @@ SPDK_NOINIT=1 ./bdev_odp_raid
 count packets in pcap file
 ----------
 ./pcapframescnt dump.pcap
+
+
+rbd
+----------
+rbd device list
+SPDK_NOINIT=1 ./bdev_odp_rbd
