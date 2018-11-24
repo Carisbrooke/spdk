@@ -25,7 +25,7 @@
 #define likely(x)       __builtin_expect((x),1)
 #define unlikely(x)     __builtin_expect((x),0)
 
-#define VERSION "1.18"
+#define VERSION "1.20"
 #define MB 1048576
 #define K4 4096
 #define SHM_PKT_POOL_BUF_SIZE  1856
@@ -38,7 +38,7 @@
 #define NUM_INPUT_Q 4
 
 #define EE_HEADER_SIZE 11
-#define FILE_NAME "/mnt/dump2.pcap"
+#define FILE_NAME "dumprbd.pcap"
 #define BUFFER_SIZE MB
 //#define BUFFER_SIZE 2048
 
@@ -423,7 +423,7 @@ static void pls_bdev_write_done_cb(struct spdk_bdev_io *bdev_io, bool success, v
 		__atomic_fetch_add(&cnt, 1, __ATOMIC_SEQ_CST);
 		global.stat_wrtd_bytes += BUFFER_SIZE;
 		if (global.wrote_offset < t->offset) //XXX - what if thread3 finish faster than thread2?
-			if (t->offset < global.wrote_offset + BUFFER_SIZE*NUM_THREADS)//diff must not be big!
+			if (t->offset < global.wrote_offset + BUFFER_SIZE*NUM_THREADS*3)//diff must not be big!
 				global.wrote_offset = t->offset;
 	}
 	else
@@ -857,6 +857,17 @@ void* init_read_thread(void *arg)
 	else
 		printf("got raid device with name [%s]\n", t->pls_target.bd->name);
 */
+
+	//rbd creation
+	t->pls_target.bd = global.bd;
+	if (!t->pls_target.bd)
+	{
+		printf("<failed to get bdev rbd device from global>\n");
+		rv = 1; return NULL;
+	}
+	else
+		printf("got rbd device with name [%s]\n", t->pls_target.bd->name);
+
 	//returns a descriptor
 	rv = spdk_bdev_open(t->pls_target.bd, 1, NULL, NULL, &t->pls_target.desc);
 	if (rv)
