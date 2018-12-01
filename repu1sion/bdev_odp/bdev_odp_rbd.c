@@ -2,7 +2,7 @@
 //continue to do IO from this thread
 
 #include <stdio.h>
-#include <time.h>
+#include <sys/time.h>
 #include <stdbool.h>
 #include <stdatomic.h>
 #include <pthread.h>
@@ -25,7 +25,7 @@
 #define likely(x)       __builtin_expect((x),1)
 #define unlikely(x)     __builtin_expect((x),0)
 
-#define VERSION "1.20"
+#define VERSION "1.23"
 #define MB 1048576
 #define K4 4096
 #define SHM_PKT_POOL_BUF_SIZE  1856
@@ -54,11 +54,12 @@
 //rbd
 #define RBD_DEVNAME "rbdev"
 #define RBD_POOLNAME "capture"
-#define RBD_IMAGE "foo"
+#define RBD_IMAGE "foo2"
 #define RBD_BLOCKSIZE 512
 
 //OPTIONS
-#define OPTION_PCAP_CREATE
+//#define OPTION_NOWRITE
+//#define OPTION_PCAP_CREATE
 #define SHOW_STATS			//speed statistics
 //#define DUMP_PACKET
 //#define DEBUG
@@ -98,6 +99,7 @@ typedef struct global_s
 	atomic_ulong stat_read_bytes;	//bytes read from disk
 } global_t;
 
+
 /* Used to pass messages between fio threads */
 struct pls_msg {
 	spdk_thread_fn	cb_fn;
@@ -135,6 +137,15 @@ struct pls_poller
 	uint64_t		period_microseconds;
 	TAILQ_ENTRY(pls_poller)	link;
 };
+
+//struct bt - contains ptrs to thread and buf
+typedef struct bt_s
+{
+	pls_thread_t *t;
+	void *buf;
+	unsigned long offset;
+} bt_t;
+
 
 global_t global;
 const char *names[NVME_MAX_BDEVS_PER_RPC];
@@ -413,7 +424,8 @@ static void pls_bdev_init_done(void *cb_arg, int rc)
 static void pls_bdev_write_done_cb(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg)
 {
 	static unsigned int cnt = 0;
-	pls_thread_t *t = (pls_thread_t*)cb_arg;
+	bt_t *bt = (bt_t*)cb_arg;
+	pls_thread_t *t = bt->t;
 
 	//printf("bdev write is done\n");
 	if (success)
@@ -422,9 +434,9 @@ static void pls_bdev_write_done_cb(struct spdk_bdev_io *bdev_io, bool success, v
 		//cnt++;
 		__atomic_fetch_add(&cnt, 1, __ATOMIC_SEQ_CST);
 		global.stat_wrtd_bytes += BUFFER_SIZE;
-		if (global.wrote_offset < t->offset) //XXX - what if thread3 finish faster than thread2?
-			if (t->offset < global.wrote_offset + BUFFER_SIZE*NUM_THREADS*3)//diff must not be big!
-				global.wrote_offset = t->offset;
+		if (global.wrote_offset < bt->offset) //XXX - what if thread3 finish faster than thread2?
+			if (bt->offset < global.wrote_offset + BUFFER_SIZE*NUM_THREADS*3)//diff must not be big!
+				global.wrote_offset = bt->offset;
 	}
 	else
 		printf("write failed\n");
@@ -434,15 +446,22 @@ static void pls_bdev_write_done_cb(struct spdk_bdev_io *bdev_io, bool success, v
 		printf("have %u successful write callabacks. thread #%d, offset: 0x%lx \n",
 			 cnt, t->idx, t->offset);
 #endif
-	debug("before freeing ram in callback at addr: %p \n", t->buf);
-	//hexdump(t->buf, BUFFER_SIZE);
+	debug("before freeing ram in callback at addr: %p \n", bt->buf);
+	//hexdump(bt->buf, BUFFER_SIZE);
  
-	spdk_dma_free(t->buf);
-	debug("after freeing ram in callback at addr: %p \n", t->buf); 
-	t->buf = NULL;
+	spdk_dma_free(bt->buf);
+
+#ifdef HL_DEBUGS
+	printf("#%d, offset: 0x%lx, freeing ram in callback at addr: %p \n",
+		t->idx, bt->offset, bt->buf);
+#endif
+	bt->buf = NULL;
 
 	//important to free bdev_io request, or it will lead to pool overflow (65K)
 	spdk_bdev_free_io(bdev_io);
+
+	//free bt
+	free(bt);
 }
 
 //this callback called when read is completed
@@ -905,8 +924,10 @@ void* init_read_thread(void *arg)
 			{
 			 if (global.overwrap_read_cnt == global.overwrap_cnt)
 			 {
+#ifdef HL_DEBUGS
 			  printf("read wait. read_offset: 0x%lx , wr0te_offset: 0x%lx, or:%lu, ow:%lu \n",
 			   offset, global.wrote_offset, global.overwrap_read_cnt, global.overwrap_cnt);
+#endif
 			  usleep(100000);
 			 }
 			 else
@@ -939,7 +960,7 @@ void* init_read_thread(void *arg)
 		now = time(NULL);
 		if (now > old)
 		{
-			printf("read_bytes per sec: %lu\n", global.stat_read_bytes - old_bytes);
+			printf("[STAT] read_bytes per sec: %lu\n", global.stat_read_bytes - old_bytes);
 			old = now;
 			old_bytes = global.stat_read_bytes;
 		}
@@ -1077,6 +1098,8 @@ void* init_thread(void *arg)
 	//odp thread init
 	rv = odp_init_local(odp_instance, ODP_THREAD_WORKER);
 
+	sleep(3);
+
 	while(1)
 	{
 		//1. if no buffer - allocate it
@@ -1101,7 +1124,6 @@ void* init_thread(void *arg)
 		pkt_len = (int)odp_packet_len(pkt);
 
 		//global.stat_rcvd_bytes += pkt_len; //increase atomic variable from every thread
-
 #ifdef SHOW_STATS
 		//stats from local thread. we increase global atomic variable once per 1000 iterations
 		bytes += pkt_len;
@@ -1118,7 +1140,7 @@ void* init_thread(void *arg)
 			now = time(NULL);
 			if (now > old)
 			{
-				printf("rcvd_bytes per sec: %lu , wrote_bytes per sec: %lu\n",
+				printf("[STAT] rcvd_bytes per sec: %lu , wrote_bytes per sec: %lu\n",
 					global.stat_rcvd_bytes - old_bytes, 
 					global.stat_wrtd_bytes - wrote_bytes);
 				old = now;
@@ -1127,7 +1149,6 @@ void* init_thread(void *arg)
 			}
 		}
 #endif
-
 		//getting timestamp
 		rv = odp_packet_has_ts(pkt);
 
@@ -1151,7 +1172,7 @@ void* init_thread(void *arg)
 			printf("dropping big packet with size: %d \n", pkt_len);
 			continue;
 		}
-
+#ifndef OPTION_NOWRITE
 		//in position we count num of bytes copied into buffer. 
 		if (pkt_len)
 		{
@@ -1174,8 +1195,22 @@ void* init_thread(void *arg)
 						global.overwrap_cnt);
 				}
 
+				//filling bt
+				bt_t *bt = calloc(1, sizeof(bt_t));
+				if (bt)
+				{
+					bt->t = t;
+					bt->buf = t->buf;
+					bt->offset = offset;
+				}
+				else
+				{
+					printf("ERROR: RAM allocation failed\n");
+					return NULL;
+				}
+
 				rv = spdk_bdev_write(t->pls_target.desc, t->pls_target.ch, 
-					t->buf, offset, nbytes, pls_bdev_write_done_cb, t);
+					t->buf, offset, nbytes, pls_bdev_write_done_cb, bt);
 				if (rv)
 					printf("#%d spdk_bdev_write failed, offset: 0x%lx, size: %lu\n",
 						t->idx, offset, nbytes);
@@ -1184,11 +1219,22 @@ void* init_thread(void *arg)
 					printf("writing %lu bytes from thread# #%d, offset: 0x%lx\n",
 						nbytes, t->idx, offset);
 #endif
+
+#if 0
 				//need to wait for bdev write completion first
+				//XXX - measure waiting time here
+				struct timeval start, end;
+				gettimeofday(&start, NULL);
 				while(t->buf)
 				{
 					usleep(10);
 				}
+				//XXX - till here
+				gettimeofday(&end, NULL);
+				long seconds = (end.tv_sec - start.tv_sec);
+				long micros = ((seconds * 1000000) + end.tv_usec) - (start.tv_usec);
+				printf("time waited for write callback completion: %ld us\n", micros);
+#endif
 				position = 0;
 
 				//allocate new buffer and place packet to it
@@ -1228,6 +1274,7 @@ void* init_thread(void *arg)
 
 			}
 		}
+#endif
 		odp_packet_free(pkt);
 	}
 
