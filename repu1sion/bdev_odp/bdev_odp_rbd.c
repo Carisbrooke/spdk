@@ -25,7 +25,7 @@
 #define likely(x)       __builtin_expect((x),1)
 #define unlikely(x)     __builtin_expect((x),0)
 
-#define VERSION "1.23"
+#define VERSION "1.24"
 #define MB 1048576
 #define K4 4096
 #define SHM_PKT_POOL_BUF_SIZE  1856
@@ -806,6 +806,10 @@ int init_odp(void)
 	odp_pktin_queue_config(pktio, &pktin_param);
 	odp_pktout_queue_config(pktio, NULL);
 
+	rv = odp_pktio_promisc_mode_set(pktio, 1);
+	if (rv < 0)
+		printf("failed to set promisc mode for odp pktio!\n");
+
 	return rv;
 }
 
@@ -1374,6 +1378,9 @@ int main(int argc, char *argv[])
 
 		rv = odp_pktin_event_queue(pktio, inq, NUM_INPUT_Q);
 		printf("num of input queues configured: %d \n", rv);
+
+		rv = odp_pktio_promisc_mode(pktio);
+		printf("promiscuous mode: %s\n", rv?"enabled":"disabled");
 
 		for (i = 0; i < NUM_THREADS; i++)
 		{
