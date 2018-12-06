@@ -51,4 +51,6 @@ count packets in pcap file
 rbd
 ----------
 rbd device list
-SPDK_NOINIT=1 ./bdev_odp_rbd
+SPDK_NOINIT=1 ./bdev_odp_rbd b
+time ODP_PKTIO_DPDK_PARAMS="--socket-mem 16384" SPDK_NOINIT=1 ./bdev_odp_rbd w
+

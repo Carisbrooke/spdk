@@ -25,7 +25,7 @@
 #define likely(x)       __builtin_expect((x),1)
 #define unlikely(x)     __builtin_expect((x),0)
 
-#define VERSION "1.24"
+#define VERSION "1.25"
 #define MB 1048576
 #define K4 4096
 #define SHM_PKT_POOL_BUF_SIZE  1856
@@ -61,6 +61,7 @@
 //#define OPTION_NOWRITE
 //#define OPTION_PCAP_CREATE
 #define SHOW_STATS			//speed statistics
+#define OPTION_STAT_RAM_ALLOCATED
 //#define DUMP_PACKET
 //#define DEBUG
 #define HL_DEBUGS			//high level debugs - on writing buffers and counting callbacks
@@ -97,6 +98,10 @@ typedef struct global_s
 	atomic_ulong stat_rcvd_bytes;	//bytes received by network from odp
 	atomic_ulong stat_wrtd_bytes;	//bytes writed to disk
 	atomic_ulong stat_read_bytes;	//bytes read from disk
+#ifdef OPTION_STAT_RAM_ALLOCATED
+	atomic_ulong stat_ram_allocated;//stat about ram allocation
+	atomic_ulong stat_max_ram_allocated;//stat about ram allocation
+#endif
 } global_t;
 
 
@@ -450,10 +455,13 @@ static void pls_bdev_write_done_cb(struct spdk_bdev_io *bdev_io, bool success, v
 	//hexdump(bt->buf, BUFFER_SIZE);
  
 	spdk_dma_free(bt->buf);
+#ifdef OPTION_STAT_RAM_ALLOCATED
+	global.stat_ram_allocated -= BUFFER_SIZE;
+#endif
 
 #ifdef HL_DEBUGS
-	printf("#%d, offset: 0x%lx, freeing ram in callback at addr: %p \n",
-		t->idx, bt->offset, bt->buf);
+	printf("write complete callback from thread #%d, offset: 0x%lx \n",
+		t->idx, bt->offset);
 #endif
 	bt->buf = NULL;
 
@@ -1116,6 +1124,11 @@ void* init_thread(void *arg)
 				return NULL;
 			}
 			debug("allocated spdk dma buffer with addr: %p\n", t->buf);
+#ifdef OPTION_STAT_RAM_ALLOCATED
+			global.stat_ram_allocated += nbytes;
+			if (global.stat_ram_allocated > global.stat_max_ram_allocated)
+				global.stat_max_ram_allocated = global.stat_ram_allocated;
+#endif
 		}
 
 		//2. get packet from queue
@@ -1249,6 +1262,14 @@ void* init_thread(void *arg)
 					return NULL;
 				}
 				debug("allocated spdk dma buffer with addr: %p\n", t->buf);
+#ifdef OPTION_STAT_RAM_ALLOCATED
+				global.stat_ram_allocated += nbytes;
+				if (global.stat_ram_allocated > global.stat_max_ram_allocated)
+					global.stat_max_ram_allocated = global.stat_ram_allocated;
+				printf("RAM allocated: %lu , MAX RAM USED: %lu\n",
+					global.stat_ram_allocated/BUFFER_SIZE, 
+					global.stat_max_ram_allocated/BUFFER_SIZE);
+#endif
 			}
 			else
 			{
