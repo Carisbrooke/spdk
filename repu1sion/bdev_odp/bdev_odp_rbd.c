@@ -25,7 +25,7 @@
 #define likely(x)       __builtin_expect((x),1)
 #define unlikely(x)     __builtin_expect((x),0)
 
-#define VERSION "1.25"
+#define VERSION "1.27"
 #define MB 1048576
 #define K4 4096
 #define SHM_PKT_POOL_BUF_SIZE  1856
@@ -59,12 +59,12 @@
 
 //OPTIONS
 //#define OPTION_NOWRITE
-//#define OPTION_PCAP_CREATE
+#define OPTION_PCAP_CREATE
 #define SHOW_STATS			//speed statistics
-#define OPTION_STAT_RAM_ALLOCATED
+//#define OPTION_STAT_RAM_ALLOCATED
 //#define DUMP_PACKET
 //#define DEBUG
-#define HL_DEBUGS			//high level debugs - on writing buffers and counting callbacks
+//#define HL_DEBUGS			//high level debugs - on writing buffers and counting callbacks
 //#define NOTZERO_OFFSET		//start not with 0x0 offset (for overwrap tests)
 
 
@@ -340,7 +340,6 @@ int pls_pcap_create(void *bf)
 	debug("buffer read, before parsing 0xEE format\n");
 	hexdump(p, BUFFER_SIZE);
 #endif
-	
 	//parsing packets in 0xEE format here
 	for (i = 0; i < BUFFER_SIZE; i++)
 	{
@@ -369,8 +368,12 @@ int pls_pcap_create(void *bf)
 			if (!len) //check for packet sanity, if no len - skip
 				continue;
 			if (len > MAX_PACKET_SIZE)
+			{
 				printf("parsing 0xEE format we have big len: %d , at addr: %p\n",
 					len, p+i);
+				printf("skip\n");
+				continue;
+			}
 			new_len = true; 
 			debug("new packet len: %d , ts: %lu \n", len, ts);
 			continue;
@@ -430,8 +433,9 @@ static void pls_bdev_write_done_cb(struct spdk_bdev_io *bdev_io, bool success, v
 {
 	static unsigned int cnt = 0;
 	bt_t *bt = (bt_t*)cb_arg;
+#ifdef HL_DEBUGS
 	pls_thread_t *t = bt->t;
-
+#endif
 	//printf("bdev write is done\n");
 	if (success)
 	{
@@ -585,6 +589,7 @@ static void pls_stop_poller(struct spdk_poller *poller, void *thread_ctx)
 int init_spdk(void)
 {
 	int rv = 0;
+	struct spdk_bdev_desc *desc;
 	//struct spdk_conf *config;
 	struct spdk_env_opts opts;
 	bool done = false;
@@ -690,13 +695,24 @@ int init_spdk(void)
 			RBD_DEVNAME, RBD_POOLNAME, RBD_IMAGE, RBD_BLOCKSIZE);
 	}
 
-	//create device
-	/*
-	spdk_bdev_nvme_create(struct spdk_nvme_transport_id *trid,
-		      const char *base_name,
-		      const char **names, size_t *count)
-	*/
+	//returns a descriptor
+	rv = spdk_bdev_open(global.bd, 1, NULL, NULL, &desc);
+	if (rv)
+	{
+		printf("failed to open device\n");
+		return -1;
+	}
 
+	global.block_size = spdk_bdev_get_block_size(global.bd);
+	global.num_blocks = spdk_bdev_get_num_blocks(global.bd);
+	printf("device block size is: %u bytes, num blocks: %lu\n", 
+		global.block_size, global.num_blocks);
+	global.max_offset = global.block_size * global.num_blocks - 1;
+	printf("max offset(bytes): 0x%lx\n", global.max_offset);
+
+	spdk_bdev_close(desc);
+
+//raid
 #if 0
 	//create needed bdev devices for raid
 	for (i = 0; i < NUM_RAID_DEVICES; i++) 
@@ -836,7 +852,6 @@ void* init_read_thread(void *arg)
 #ifdef NOTZERO_OFFSET
 	offset = START_OFFSET;
 #endif
-
 	t->ring = spdk_ring_create(SPDK_RING_TYPE_MP_SC, 4096, SPDK_ENV_SOCKET_ID_ANY);
 	if (!t->ring) 
 	{
@@ -967,7 +982,6 @@ void* init_read_thread(void *arg)
 			offset = 0;
 			printf("read overwrap: %lu. read offset reset to 0\n", global.overwrap_read_cnt);
 		}
-
 #ifdef SHOW_STATS
 		now = time(NULL);
 		if (now > old)
@@ -977,7 +991,6 @@ void* init_read_thread(void *arg)
 			old_bytes = global.stat_read_bytes;
 		}
 #endif
-
 		//need to wait for bdev read completion first
 		while(t->read_complete == false)
 		{
@@ -1179,15 +1192,13 @@ void* init_thread(void *arg)
 			o_time.nsec = 0;
 
 		if (pkt_len > MAX_PACKET_SIZE)
-			printf("have big packet with len: %d \n", pkt_len);
+		{
+			printf("have big packet with len: %d . dropping.\n", pkt_len);
 #ifdef DUMP_PACKET
 		debug("got packet with len: %d\n", pkt_len);
 		hexdump(odp_packet_l2_ptr(pkt, NULL), pkt_len);
 #endif
-		if (pkt_len > MAX_PACKET_SIZE)
-		{
-			printf("dropping big packet with size: %d \n", pkt_len);
-			continue;
+		continue;
 		}
 #ifndef OPTION_NOWRITE
 		//in position we count num of bytes copied into buffer. 
