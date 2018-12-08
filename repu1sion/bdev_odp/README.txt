@@ -11,7 +11,8 @@ SPDK_NOINIT=1 ./bdev_odp_raid
 
 dump
 -----
-tcpdump --number --time-stamp-precision=nano -r dump.pcap 
+tcpdump --number --time-stamp-precision=nano -r dump.pcap
+time tcpdump --number --time-stamp-precision=nano -r dumprbd.pcap > 1 
 
 free pages
 -----
