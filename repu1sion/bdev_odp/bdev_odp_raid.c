@@ -51,7 +51,7 @@
 
 //OPTIONS
 #define OPTION_PCAP_CREATE
-//#define SHOW_STATS			//speed statistics
+#define SHOW_STATS			//speed statistics
 //#define DUMP_PACKET
 //#define DEBUG
 //#define HL_DEBUGS			//high level debugs - on writing buffers and counting callbacks
@@ -441,7 +441,7 @@ static void pls_bdev_read_done_cb(struct spdk_bdev_io *bdev_io, bool success, vo
 	static unsigned int cnt = 0;
 	pls_thread_t *t = (pls_thread_t*)cb_arg;
 
-	//printf("bdev read is done\n");
+	/*printf("bdev read is done\n");*/
 	if (success)
 	{
 		t->read_complete = true;
@@ -695,7 +695,7 @@ int init_spdk(void)
 	global.kb = global.bytes / 1024;
 	printf("device block size is: %u bytes, num blocks: %lu, bytes: %lu, kb: %lu\n",
 		global.block_size, global.num_blocks, global.bytes, global.kb);
-	global.max_offset = global.block_size * global.num_blocks - 1;
+	global.max_offset = global.block_size * global.num_blocks - 1; //XXX - it will be overwrited later
 	printf("max offset(bytes): 0x%lx\n", global.max_offset);
 
 	spdk_bdev_close(desc);//let's don't keep first device open
@@ -757,6 +757,10 @@ int init_odp(void)
 	odp_pktin_queue_config(pktio, &pktin_param);
 	odp_pktout_queue_config(pktio, NULL);
 
+        rv = odp_pktio_promisc_mode_set(pktio, 1);
+        if (rv < 0)
+                printf("failed to set promisc mode for odp pktio!\n");
+
 	return rv;
 }
 
@@ -811,7 +815,8 @@ void* init_read_thread(void *arg)
 */
 
 	struct raid_bdev_config *raid_cfg = NULL;
-	raid_cfg = raid_bdev_config_find_by_name(RAID_DEVICE);
+	//raid_cfg = raid_bdev_config_find_by_name(RAID_DEVICE);
+	raid_cfg = spdk_construct_raid_cfg(RAID_DEVICE);
 	if (!raid_cfg)
 	{
 		printf("<failed to get raid config>\n");
@@ -976,7 +981,8 @@ void* init_thread(void *arg)
 	TAILQ_INIT(&t->pollers);
 
 	struct raid_bdev_config *raid_cfg = NULL;
-	raid_cfg = raid_bdev_config_find_by_name(RAID_DEVICE);
+	//raid_cfg = raid_bdev_config_find_by_name(RAID_DEVICE);
+	raid_cfg = spdk_construct_raid_cfg(RAID_DEVICE);
 	if (!raid_cfg)
 	{
 		printf("<failed to get raid config>\n");
@@ -1271,6 +1277,9 @@ int main(int argc, char *argv[])
 
 		rv = odp_pktin_event_queue(pktio, inq, NUM_INPUT_Q);
 		printf("num of input queues configured: %d \n", rv);
+
+                rv = odp_pktio_promisc_mode(pktio);
+                printf("promiscuous mode: %s\n", rv?"enabled":"disabled");
 
 		for (i = 0; i < NUM_THREADS; i++)
 		{

@@ -40,8 +40,11 @@ sequence to run raid app:
 0. install and build ofed, dpdk, odp, spdk.
 
 PATH=/opt/rh/devtoolset-3/root/usr/bin:$PATH
+cd /root/spdkp
 ./scripts/setup.sh
-SPDK_NOINIT=1 ./bdev_odp_raid
+cd repu1sion/bdev_odp
+make -f Makefile_raid
+SPDK_NOINIT=1 ./bdev_odp_raid b
 
 
 count packets in pcap file
