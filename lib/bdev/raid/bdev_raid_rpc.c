@@ -292,6 +292,22 @@ spdk_rpc_construct_raid_bdev(struct spdk_jsonrpc_request *request,
 }
 SPDK_RPC_REGISTER("construct_raid_bdev", spdk_rpc_construct_raid_bdev, SPDK_RPC_RUNTIME)
 
+
+struct raid_bdev_config * spdk_construct_raid_cfg(const char *raid_name)
+{
+	struct raid_bdev_config *raid_cfg;
+
+	TAILQ_FOREACH(raid_cfg, &g_spdk_raid_config.raid_bdev_config_head, link) {
+		if (!strcmp(raid_cfg->name, raid_name)) {
+			return raid_cfg;
+		}
+	}
+
+	return raid_cfg;
+}
+
+
+
 //repu1sion
 //strip_size - raid size in blocks
 int spdk_construct_raid_bdev(char *raidname, uint32_t raidsize, uint8_t raidlevel, 
@@ -382,6 +398,16 @@ int spdk_construct_raid_bdev(char *raidname, uint32_t raidsize, uint8_t raidleve
 	return 0;
 }
 
+/*
+int spdk_construct_raid_wtf(char *name)
+{
+	int rv = 0;
+
+	printf("name: %s \n", name);
+
+	return rv;
+}
+*/
 
 /*
  * Input structure for RPC destroy_raid

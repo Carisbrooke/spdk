@@ -217,10 +217,12 @@ int raid_bdev_config_add(const char *raid_name, int strip_size, int num_base_bde
 int raid_bdev_config_add_base_bdev(struct raid_bdev_config *raid_cfg,
 				   const char *base_bdev_name, uint32_t slot);
 void raid_bdev_config_cleanup(struct raid_bdev_config *raid_cfg);
-struct raid_bdev_config *raid_bdev_config_find_by_name(const char *raid_name);
+struct raid_bdev_config * raid_bdev_config_find_by_name(const char *raid_name);
 
 //repu1sion
+struct raid_bdev_config * spdk_construct_raid_cfg(const char *raid_name);
 int spdk_construct_raid_bdev(char *raidname, uint32_t raidsize, uint8_t raidlevel, size_t numdevices,
 			     const char *dev1, const char *dev2);
+//int spdk_construct_raid_wtf(char *);
 
 #endif // SPDK_BDEV_RAID_INTERNAL_H
